@@ -433,6 +433,15 @@ async def send_captcha(guild: discord.Guild, member: discord.Member):
     cleanup_captcha_store()
     view = CaptchaStartView(member.id)
 
+    # 1) DM si possible
+    try:
+        return await member.send(
+            "Bienvenue ! Pour accéder au serveur, clique ci-dessous pour te vérifier :",
+            view=view,
+        )
+    except discord.Forbidden:
+        pass
+
     # 2) fallback dans auto-rôles / bienvenue
     try:
         cat = discord.utils.get(guild.categories, name=CAT_WELCOME_NAME)
@@ -451,6 +460,7 @@ async def send_captcha(guild: discord.Guild, member: discord.Member):
         pass
 
     return None
+
 
 # ===================== Ranks (Valorant) =====================
 TIERS = [
