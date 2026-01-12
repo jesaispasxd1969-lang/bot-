@@ -990,62 +990,275 @@ class FiveBot(commands.Bot):
 
 bot = FiveBot()
 
-# ===================== CAPTCHA router & /verify (après bot = ...) =====================
-@bot.listen("on_interaction")
-async def captcha_router(inter: discord.Interaction):
+# ===================== CAPTCHA (robuste + simple visuellement) =====================
+# Dépendances requises: Pillow (PIL)
+# Hypothèses: tu as déjà `ensure_security_roles`, `CAT_WELCOME_NAME`, `find_text_by_slug` dans ton code.
+
+import io, time, random, hmac, hashlib
+from typing import Dict, Optional
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
+import discord
+
+# ---------- PARAMS ----------
+CAPTCHA_ATTEMPTS      = 3
+CAPTCHA_CODE_LEN      = 6
+HUMAN_MIN_SECONDS     = 1.2       # anti "trop rapide" (plus permissif)
+RETRY_COOLDOWN        = 5.0       # cooldown entre 2 essais
+CAPTCHA_TTL_SECONDS   = 15 * 60   # expiration mémoire
+ALPHABET              = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+# state: user_id -> dict
+_captcha_store: Dict[int, dict] = {}
+_SECRET = hashlib.sha256(str(random.random()).encode()).digest()
+
+def now() -> float:
+    return time.time()
+
+def htag(s: str) -> str:
+    return hmac.new(_SECRET, s.encode(), hashlib.sha256).hexdigest()[:16]
+
+def rand_text(n: int) -> str:
+    return "".join(random.choice(ALPHABET) for _ in range(n))
+
+def cleanup_captcha_store():
+    t = now()
+    for uid in list(_captcha_store.keys()):
+        st = _captcha_store.get(uid)
+        if not st:
+            continue
+        if st.get("ttl", 0) <= t:
+            _captcha_store.pop(uid, None)
+
+# ---------- CAPTCHA IMAGE (ultra lisible) ----------
+def _font_simple():
+    for f, size in [("DejaVuSans-Bold.ttf", 52), ("DejaVuSans.ttf", 52), ("arial.ttf", 52)]:
+        try:
+            return ImageFont.truetype(f, size)
+        except:
+            pass
+    return ImageFont.load_default()
+
+def build_captcha_image(code: str) -> bytes:
+    W, H = 360, 130
+    img = Image.new("RGB", (W, H), (245, 245, 245))  # fond clair
+    d = ImageDraw.Draw(img)
+    font = _font_simple()
+
+    # 3 lignes discrètes
+    for _ in range(3):
+        y = random.randint(20, H - 20)
+        d.line((10, y, W - 10, y), fill=(185, 185, 185), width=2)
+
+    # points légers
+    for _ in range(120):
+        d.point((random.randint(0, W - 1), random.randint(0, H - 1)), fill=(210, 210, 210))
+
+    # texte centré + contour (stroke)
+    bbox = d.textbbox((0, 0), code, font=font)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    x = (W - tw) // 2
+    y = (H - th) // 2 - 2
+
+    # caractère par caractère avec micro-jitter (anti OCR basique, humain OK)
+    for ch in code:
+        dx = random.randint(-2, 2)
+        dy = random.randint(-2, 2)
+        d.text(
+            (x + dx, y + dy),
+            ch,
+            font=font,
+            fill=(10, 10, 10),
+            stroke_width=3,
+            stroke_fill=(255, 255, 255),
+        )
+        cb = d.textbbox((0, 0), ch, font=font)
+        cw = cb[2] - cb[0]
+        x += cw + 10  # espacement large
+
+    img = img.filter(ImageFilter.SHARPEN)
+
+    b = io.BytesIO()
+    img.save(b, "PNG", optimize=True)
+    b.seek(0)
+    return b.getvalue()
+
+# ---------- UI ----------
+class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
+    answer = discord.ui.TextInput(
+        label="Recopie le code (MAJUSCULES, sans espace)",
+        placeholder="Ex: 7K8P2Q",
+        max_length=16,
+        required=True,
+    )
+
+    def __init__(self, uid: int):
+        super().__init__()
+        self.uid = uid
+
+    async def on_submit(self, inter: discord.Interaction):
+        cleanup_captcha_store()
+        st = _captcha_store.get(self.uid)
+        if not st:
+            return await inter.response.send_message("CAPTCHA expiré. Relance **/verify**.", ephemeral=True)
+
+        t = now()
+
+        # anti "trop rapide"
+        if t - st["started"] < HUMAN_MIN_SECONDS:
+            return await inter.response.send_message("Trop rapide 😅 Réessaie dans 2 secondes.", ephemeral=True)
+
+        # cooldown
+        if t - st["last"] < RETRY_COOLDOWN:
+            left = int(RETRY_COOLDOWN - (t - st["last"]))
+            return await inter.response.send_message(f"Cooldown… attends **{left}s**.", ephemeral=True)
+
+        st["last"] = t
+        st["tries"] += 1
+
+        # comparaison
+        got = self.answer.value.strip().upper().replace(" ", "")
+        if got == st["expected"]:
+            _captcha_store.pop(self.uid, None)
+
+            roles = await ensure_security_roles(inter.guild)
+            # retire Non vérifié
+            try:
+                if roles["unverified"] in inter.user.roles:
+                    await inter.user.remove_roles(roles["unverified"], reason="Captcha validé")
+            except discord.Forbidden:
+                pass
+            # ajoute Membre
+            try:
+                if roles["member"] not in inter.user.roles:
+                    await inter.user.add_roles(roles["member"], reason="Captcha validé")
+            except discord.Forbidden:
+                pass
+
+            return await inter.response.send_message("✅ Vérifié ! Bienvenue.", ephemeral=True)
+
+        # échec
+        if st["tries"] >= CAPTCHA_ATTEMPTS:
+            _captcha_store.pop(self.uid, None)
+            return await inter.response.send_message("❌ Trop d'essais. Relance **/verify** plus tard.", ephemeral=True)
+
+        left = CAPTCHA_ATTEMPTS - st["tries"]
+        await inter.response.send_message(f"❌ Mauvais code. Essais restants : **{left}**.", ephemeral=True)
+
+class CaptchaStartView(discord.ui.View):
+    def __init__(self, uid: int):
+        super().__init__(timeout=None)
+        self.uid = uid
+        self.add_item(
+            discord.ui.Button(
+                label="🔒 Commencer la vérification",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"cap:start:{uid}:{htag(f'start:{uid}')}",
+            )
+        )
+
+# IMPORTANT: routeur d'interactions (à enregistrer UNE SEULE FOIS dans ton code)
+# -> si tu avais déjà un router "cap:*", remplace-le par celui-ci.
+async def captcha_handle_component(inter: discord.Interaction):
     try:
         if inter.type != discord.InteractionType.component:
             return
-        cid = inter.data.get("custom_id","")
+        cid = (inter.data or {}).get("custom_id", "")
         if not cid.startswith("cap:"):
             return
+
         parts = cid.split(":")
         if len(parts) < 4:
             return
+
         _, action, uid_s, tag = parts
         uid = int(uid_s)
 
+        # sécurité: bouton pour le bon user
+        if inter.user.id != uid:
+            return await inter.response.send_message("Ce bouton ne t’est pas destiné.", ephemeral=True)
+
+        cleanup_captcha_store()
+
         if action == "start":
-            if htag(f"start:{uid}") != tag or inter.user.id != uid:
+            if htag(f"start:{uid}") != tag:
                 return
+
             code = rand_text(CAPTCHA_CODE_LEN)
-            pos = pick_positions(CAPTCHA_CODE_LEN, 3)
-            expected = subseq(code, pos)
             _captcha_store[uid] = {
-                "code": code, "expected": expected, "pos": pos,
-                "tries": 0, "started": time.time(), "last": 0,
-                "ttl": time.time() + CAPTCHA_TTL_SECONDS,
+                "expected": code,
+                "tries": 0,
+                "started": now(),
+                "last": 0.0,
+                "ttl": now() + CAPTCHA_TTL_SECONDS,
             }
+
             img = build_captcha_image(code)
             file = discord.File(io.BytesIO(img), filename="captcha.png")
-            pos_txt = ", ".join(f"#{p}" for p in pos)
+
             emb = discord.Embed(
-                title="Recopie uniquement ces positions",
-                description=f"Écris **{pos_txt}** du code affiché.",
-                color=0x2ecc71
+                title="🔐 Vérification",
+                description=(
+                    "Recopie **exactement** le code de l’image.\n"
+                    "• **MAJUSCULES**\n"
+                    "• **sans espace**\n"
+                    "• pas de `0/O` ni `1/I` ici"
+                ),
+                color=0x5865F2,
             )
             emb.set_image(url="attachment://captcha.png")
+
             v = discord.ui.View()
-            v.add_item(discord.ui.Button(
-                label="✍️ Répondre",
-                style=discord.ButtonStyle.success,
-                custom_id=f"cap:answer:{uid}:{htag(f'answer:{uid}')}"
-            ))
+            v.add_item(
+                discord.ui.Button(
+                    label="✍️ Répondre",
+                    style=discord.ButtonStyle.success,
+                    custom_id=f"cap:answer:{uid}:{htag(f'answer:{uid}')}",
+                )
+            )
             return await inter.response.send_message(embed=emb, file=file, view=v, ephemeral=True)
 
-        elif action == "answer":
-            if htag(f"answer:{uid}") != tag or inter.user.id != uid:
+        if action == "answer":
+            if htag(f"answer:{uid}") != tag:
                 return
             return await inter.response.send_modal(CaptchaModal(uid))
 
     except Exception:
+        # on évite de crasher le bot
+        return
+
+# ---------- ENVOI DU CAPTCHA ----------
+async def send_captcha(guild: discord.Guild, member: discord.Member):
+    cleanup_captcha_store()
+    view = CaptchaStartView(member.id)
+
+    # 1) DM si possible
+    try:
+        return await member.send(
+            "Bienvenue ! Pour accéder au serveur, clique ci-dessous pour te vérifier :",
+            view=view,
+        )
+    except discord.Forbidden:
         pass
 
-@bot.tree.command(description="Relancer la vérification (si tu n'as pas pu la faire).")
-async def verify(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    await send_captcha(interaction.guild, interaction.user)
-    await interaction.followup.send("Vérification envoyée (DM ou salon bienvenue).", ephemeral=True)
+    # 2) fallback dans auto-rôles / bienvenue
+    try:
+        cat = discord.utils.get(guild.categories, name=CAT_WELCOME_NAME)
+        if cat:
+            ch = (
+                find_text_by_slug(cat, "auto rôles")
+                or find_text_by_slug(cat, "auto-rôles")
+                or find_text_by_slug(cat, "bienvenue")
+            )
+            if ch and ch.permissions_for(guild.me).send_messages:
+                return await ch.send(
+                    f"{member.mention} ▶️ Clique pour démarrer la vérification :",
+                    view=view,
+                )
+    except Exception:
+        pass
+
+    return None
 
 # ===================== Events =====================
 @bot.event
