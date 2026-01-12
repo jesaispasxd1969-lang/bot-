@@ -426,8 +426,7 @@ TIERS = [
     ("gold","Gold",3), ("platinum","Platinum",3), ("diamond","Diamond",3),
     ("ascendant","Ascendant",3), ("immortal","Immortal",3), ("radiant","Radiant",1),
 ]
-TIER_INDEX = {k:i for k,i_ in enumerate([t[0] for t in TIERS]) for k in [TIERS[k][0]]}  # (compact) safe
-TIER_INDEX = {k:i for i,(k,_,_) in enumerate(TIERS)}
+TIER_INDEX = {k: i for i, (k, _, _) in enumerate(TIERS)}
 TIER_META  = {k:(label,divs) for k,label,divs in TIERS}
 TIER_ALIASES = {
     "argent":"silver","or":"gold","platine":"platinum","diamant":"diamond",
