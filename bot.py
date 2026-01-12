@@ -50,7 +50,6 @@ CAT_PP_NAME       = "🛡️・CONTRATS (P-P)"
 WELCOME_CHANNELS = [
     ("🐺・bienvenue", "text"),
     ("🕯️・règlement", "text"),
-    ("🪙・auto-rôles", "text"),
     ("📣・annonces", "text"),
     ("🏰・table-ronde", "text"),
     ("🆘・support", "text"),
@@ -59,19 +58,16 @@ WELCOME_CHANNELS = [
 COMMU_CHANNELS = [
     ("🍻・taverne", "text"),
     ("🖼️・médias", "text"),
-    ("🪙・échanges", "text"),
     ("🎯・scrims", "text"),
     ("🏆・ranked", "text"),
     ("🧩・commandes", "text"),
     ("💡・suggestions", "text"),
-    ("🔥・chasse-sauvage", "text"),
     ("🔗・vos-réseaux", "text"),
 ]
 PP_TEXT = [
     ("🛡️・contrats-pp", "text"),
     ("📜・règlement-pp", "text"),
-    ("🏷️・party-code", "text"),
-    ("🎲・roulette-maps", "text"),
+    ("🪙・auto-rôles", "text"),
     ("🧭・demande-orga-pp", "text"),
 ]
 
