@@ -313,12 +313,7 @@ class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
         self.guild_id = guild_id
         self.uid = uid
 
-    async def on_submit(self, inter: discord.Interaction):
-        cleanup_captcha_store()
-        key = (self.guild_id, self.uid)
-        st = _captcha_store.get(key)
-       
-        try:
+    try:
                 vkey = (self.guild_id, self.uid)
                 pub = _verify_msg_store.pop(vkey, None)
                 if pub:
@@ -330,8 +325,12 @@ class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
                         except:
                             pass
             except:
-                pass
-                
+                pass   
+    
+    async def on_submit(self, inter: discord.Interaction):
+        cleanup_captcha_store()
+        key = (self.guild_id, self.uid)
+        st = _captcha_store.get(key)
         if not st:
             return await inter.response.send_message("CAPTCHA expiré. Clique à nouveau sur **🔒 Commencer**.", ephemeral=True)
 
