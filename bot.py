@@ -217,6 +217,19 @@ ALPHABET              = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 _captcha_store: Dict[tuple, dict] = {}
 _SECRET = hashlib.sha256(str(random.random()).encode()).digest()
 
+5# Message public de vérif (anti-duplicate)
+_verify_msg_store: Dict[tuple, dict] = {}  # (guild_id, user_id) -> {channel_id, message_id, ttl}
+VERIFY_MSG_TTL_SECONDS = 15 * 60
+
+def cleanup_verify_msg_store():
+    t = now()
+    for key in list(_verify_msg_store.keys()):
+        st = _verify_msg_store.get(key)
+        if not st:
+            continue
+        if st.get("ttl", 0) <= t:
+            _verify_msg_store.pop(key, None)
+
 def now() -> float:
     return time.time()
 
@@ -304,6 +317,21 @@ class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
         cleanup_captcha_store()
         key = (self.guild_id, self.uid)
         st = _captcha_store.get(key)
+       
+        try:
+                vkey = (self.guild_id, self.uid)
+                pub = _verify_msg_store.pop(vkey, None)
+                if pub:
+                    ch = inter.guild.get_channel(pub["channel_id"])
+                    if ch:
+                        try:
+                            m = await ch.fetch_message(pub["message_id"])
+                            await m.delete()
+                        except:
+                            pass
+            except:
+                pass
+                
         if not st:
             return await inter.response.send_message("CAPTCHA expiré. Clique à nouveau sur **🔒 Commencer**.", ephemeral=True)
 
@@ -357,17 +385,29 @@ class CaptchaStartView(discord.ui.View):
         )
 
 async def send_captcha_in_bienvenue(guild: discord.Guild, member: discord.Member):
-    """
-    Envoie UNIQUEMENT dans #🐺・bienvenue (pas DM, pas auto-rôles).
-    """
     cleanup_captcha_store()
+    cleanup_verify_msg_store()
+
+    # évite les doublons (si déjà envoyé récemment)
+    key = (guild.id, member.id)
+    prev = _verify_msg_store.get(key)
+    if prev:
+        ch = guild.get_channel(prev["channel_id"])
+        if ch:
+            try:
+                # si le message existe encore, on ne renvoie pas
+                await ch.fetch_message(prev["message_id"])
+                return None
+            except:
+                # message supprimé ou introuvable -> on renverra
+                _verify_msg_store.pop(key, None)
+
     cat = discord.utils.get(guild.categories, name=CAT_WELCOME_NAME)
     if not cat:
         return None
 
     ch = find_text_by_slug(cat, "bienvenue")
     if not ch:
-        # fallback: si pas trouvé, on prend le 1er salon texte de la cat
         ch = cat.text_channels[0] if cat.text_channels else None
     if not ch:
         return None
@@ -376,10 +416,17 @@ async def send_captcha_in_bienvenue(guild: discord.Guild, member: discord.Member
         return None
 
     view = CaptchaStartView(guild.id, member.id)
-    return await ch.send(
-        f"{member.mention} 🐺 **Bienvenue !** Clique sur le bouton pour te vérifier :",
+    msg = await ch.send(
+        f"{member.mention} 🐺 Bienvenue ! Clique sur le bouton pour te vérifier :",
         view=view
     )
+
+    _verify_msg_store[key] = {
+        "channel_id": ch.id,
+        "message_id": msg.id,
+        "ttl": now() + VERIFY_MSG_TTL_SECONDS
+    }
+    return msg
 
 # ===================== Ranks (Valorant) =====================
 TIERS = [
@@ -1193,7 +1240,8 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    # rôles sécurité
+    if member.bot:
+        return
     roles = await ensure_security_roles(member.guild)
     try:
         if roles["member"] in member.roles:
@@ -1203,7 +1251,6 @@ async def on_member_join(member: discord.Member):
     except discord.Forbidden:
         pass
 
-    # envoi CAPTCHA dans BIENVENUE
     await send_captcha_in_bienvenue(member.guild, member)
 
 @bot.event
