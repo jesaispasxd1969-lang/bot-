@@ -50,7 +50,6 @@ CAT_PP_NAME       = "🛡️・CONTRATS (P-P)"
 WELCOME_CHANNELS = [
     ("🐺・bienvenue", "text"),
     ("🕯️・règlement", "text"),
-    ("🪙・auto-rôles", "text"),
     ("📣・annonces", "text"),
     ("🏰・table-ronde", "text"),
     ("🆘・support", "text"),
@@ -59,19 +58,16 @@ WELCOME_CHANNELS = [
 COMMU_CHANNELS = [
     ("🍻・taverne", "text"),
     ("🖼️・médias", "text"),
-    ("🪙・échanges", "text"),
     ("🎯・scrims", "text"),
     ("🏆・ranked", "text"),
     ("🧩・commandes", "text"),
     ("💡・suggestions", "text"),
-    ("🔥・chasse-sauvage", "text"),
     ("🔗・vos-réseaux", "text"),
 ]
 PP_TEXT = [
     ("🛡️・contrats-pp", "text"),
     ("📜・règlement-pp", "text"),
-    ("🏷️・party-code", "text"),
-    ("🎲・roulette-maps", "text"),
+    ("🪙・auto-rôles", "text"),
     ("🧭・demande-orga-pp", "text"),
 ]
 
@@ -162,17 +158,54 @@ async def ensure_security_roles(guild: discord.Guild) -> dict:
         mem = await guild.create_role(name=MEMBER_ROLE_NAME, reason="Security: Membre")
     return {"unverified": unv, "member": mem}
 
-async def lock_category(cat: discord.CategoryChannel,
-                        everyone: discord.Role,
-                        unverified: discord.Role,
-                        member: discord.Role,
-                        is_welcome: bool):
-    ow = cat.overwrites or {}
-    ow[everyone]   = discord.PermissionOverwrite(view_channel=False)
-    ow[member]     = discord.PermissionOverwrite(view_channel=True)
-    # Non vérifié ne voit que la cat de bienvenue (auto-rôles / vérification)
-    ow[unverified] = discord.PermissionOverwrite(view_channel=is_welcome, send_messages=is_welcome)
+async def lock_category(
+    cat: discord.CategoryChannel,
+    everyone: discord.Role,
+    unverified: discord.Role,
+    member: discord.Role,
+    is_welcome: bool
+):
+    ow = dict(cat.overwrites or {})
+    ow[everyone] = discord.PermissionOverwrite(view_channel=False)
+
+    ow[member] = discord.PermissionOverwrite(
+        view_channel=True,
+        send_messages=True,
+        read_message_history=True
+    )
+
+    if is_welcome:
+        # Non vérifié : voit la catégorie, MAIS pas d’écriture par défaut
+        ow[unverified] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=False,
+            read_message_history=True
+        )
+    else:
+        ow[unverified] = discord.PermissionOverwrite(view_channel=False)
+
     await cat.edit(overwrites=ow, reason="Security: category lock")
+
+async def allow_unverified_in_welcome_channels(guild: discord.Guild):
+    """✅ Ici on autorise les Non vérifié à écrire UNIQUEMENT dans 🐺・bienvenue."""
+    roles = await ensure_security_roles(guild)
+    unv = roles["unverified"]
+
+    cat = discord.utils.get(guild.categories, name=CAT_WELCOME_NAME)
+    if not cat:
+        return
+
+    bienvenue = find_text_by_slug(cat, "bienvenue")  # <-- c'est là qu'on met la vérif
+    if not bienvenue:
+        return
+
+    ow = dict(bienvenue.overwrites or {})
+    ow[unv] = discord.PermissionOverwrite(
+        view_channel=True,
+        send_messages=True,
+        read_message_history=True
+    )
+    await bienvenue.edit(overwrites=ow, reason="Security: allow unverified in bienvenue")
 
 async def apply_security_perms(guild: discord.Guild):
     roles = await ensure_security_roles(guild)
@@ -191,24 +224,17 @@ async def apply_security_perms(guild: discord.Guild):
     for c in [commu, fun, pp]:
         if c: await lock_category(c, everyone, unv, mem, is_welcome=False)
 
-# ===================== CAPTCHA (robuste + simple visuellement) =====================
-# Dépendances requises: Pillow (PIL)
-# Hypothèses: tu as déjà `ensure_security_roles`, `CAT_WELCOME_NAME`, `find_text_by_slug` dans ton code.
+    # ✅ autorise l'écriture uniquement dans #bienvenue
+    await allow_unverified_in_welcome_channels(guild)
 
-import io, time, random, hmac, hashlib
-from typing import Dict, Optional
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
-import discord
-
-# ---------- PARAMS ----------
+# ===================== CAPTCHA (simple visuellement) =====================
 CAPTCHA_ATTEMPTS      = 3
 CAPTCHA_CODE_LEN      = 6
-HUMAN_MIN_SECONDS     = 1.2       # anti "trop rapide" (plus permissif)
+HUMAN_MIN_SECONDS     = 1.2       # anti "trop rapide"
 RETRY_COOLDOWN        = 5.0       # cooldown entre 2 essais
-CAPTCHA_TTL_SECONDS   = 15 * 60   # expiration mémoire
+CAPTCHA_TTL_SECONDS   = 15 * 60
 ALPHABET              = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
-# state: user_id -> dict
 _captcha_store: Dict[int, dict] = {}
 _SECRET = hashlib.sha256(str(random.random()).encode()).digest()
 
@@ -230,7 +256,6 @@ def cleanup_captcha_store():
         if st.get("ttl", 0) <= t:
             _captcha_store.pop(uid, None)
 
-# ---------- CAPTCHA IMAGE (ultra lisible) ----------
 def _font_simple():
     for f, size in [("DejaVuSans-Bold.ttf", 52), ("DejaVuSans.ttf", 52), ("arial.ttf", 52)]:
         try:
@@ -241,27 +266,23 @@ def _font_simple():
 
 def build_captcha_image(code: str) -> bytes:
     W, H = 360, 130
-    img = Image.new("RGB", (W, H), (245, 245, 245))  # fond clair
+    img = Image.new("RGB", (W, H), (245, 245, 245))
     d = ImageDraw.Draw(img)
     font = _font_simple()
 
-    # 3 lignes discrètes
     for _ in range(3):
         y = random.randint(20, H - 20)
         d.line((10, y, W - 10, y), fill=(185, 185, 185), width=2)
 
-    # points légers
     for _ in range(120):
         d.point((random.randint(0, W - 1), random.randint(0, H - 1)), fill=(210, 210, 210))
 
-    # texte centré + contour (stroke)
     bbox = d.textbbox((0, 0), code, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
     x = (W - tw) // 2
     y = (H - th) // 2 - 2
 
-    # caractère par caractère avec micro-jitter (anti OCR basique, humain OK)
     for ch in code:
         dx = random.randint(-2, 2)
         dy = random.randint(-2, 2)
@@ -275,16 +296,14 @@ def build_captcha_image(code: str) -> bytes:
         )
         cb = d.textbbox((0, 0), ch, font=font)
         cw = cb[2] - cb[0]
-        x += cw + 10  # espacement large
+        x += cw + 10
 
     img = img.filter(ImageFilter.SHARPEN)
-
     b = io.BytesIO()
     img.save(b, "PNG", optimize=True)
     b.seek(0)
     return b.getvalue()
 
-# ---------- UI ----------
 class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
     answer = discord.ui.TextInput(
         label="Recopie le code (MAJUSCULES, sans espace)",
@@ -305,11 +324,9 @@ class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
 
         t = now()
 
-        # anti "trop rapide"
         if t - st["started"] < HUMAN_MIN_SECONDS:
             return await inter.response.send_message("Trop rapide 😅 Réessaie dans 2 secondes.", ephemeral=True)
 
-        # cooldown
         if t - st["last"] < RETRY_COOLDOWN:
             left = int(RETRY_COOLDOWN - (t - st["last"]))
             return await inter.response.send_message(f"Cooldown… attends **{left}s**.", ephemeral=True)
@@ -317,19 +334,17 @@ class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
         st["last"] = t
         st["tries"] += 1
 
-        # comparaison
         got = self.answer.value.strip().upper().replace(" ", "")
         if got == st["expected"]:
             _captcha_store.pop(self.uid, None)
 
             roles = await ensure_security_roles(inter.guild)
-            # retire Non vérifié
             try:
                 if roles["unverified"] in inter.user.roles:
                     await inter.user.remove_roles(roles["unverified"], reason="Captcha validé")
             except discord.Forbidden:
                 pass
-            # ajoute Membre
+
             try:
                 if roles["member"] not in inter.user.roles:
                     await inter.user.add_roles(roles["member"], reason="Captcha validé")
@@ -338,7 +353,6 @@ class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
 
             return await inter.response.send_message("✅ Vérifié ! Bienvenue.", ephemeral=True)
 
-        # échec
         if st["tries"] >= CAPTCHA_ATTEMPTS:
             _captcha_store.pop(self.uid, None)
             return await inter.response.send_message("❌ Trop d'essais. Relance **/verify** plus tard.", ephemeral=True)
@@ -358,8 +372,6 @@ class CaptchaStartView(discord.ui.View):
             )
         )
 
-# IMPORTANT: routeur d'interactions (à enregistrer UNE SEULE FOIS dans ton code)
-# -> si tu avais déjà un router "cap:*", remplace-le par celui-ci.
 async def captcha_handle_component(inter: discord.Interaction):
     try:
         if inter.type != discord.InteractionType.component:
@@ -375,7 +387,6 @@ async def captcha_handle_component(inter: discord.Interaction):
         _, action, uid_s, tag = parts
         uid = int(uid_s)
 
-        # sécurité: bouton pour le bon user
         if inter.user.id != uid:
             return await inter.response.send_message("Ce bouton ne t’est pas destiné.", ephemeral=True)
 
@@ -425,10 +436,8 @@ async def captcha_handle_component(inter: discord.Interaction):
             return await inter.response.send_modal(CaptchaModal(uid))
 
     except Exception:
-        # on évite de crasher le bot
         return
 
-# ---------- ENVOI DU CAPTCHA ----------
 async def send_captcha(guild: discord.Guild, member: discord.Member):
     cleanup_captcha_store()
     view = CaptchaStartView(member.id)
@@ -442,15 +451,11 @@ async def send_captcha(guild: discord.Guild, member: discord.Member):
     except discord.Forbidden:
         pass
 
-    # 2) fallback dans auto-rôles / bienvenue
+    # 2) fallback dans 🐺・bienvenue (pas auto-rôles)
     try:
         cat = discord.utils.get(guild.categories, name=CAT_WELCOME_NAME)
         if cat:
-            ch = (
-                find_text_by_slug(cat, "auto rôles")
-                or find_text_by_slug(cat, "auto-rôles")
-                or find_text_by_slug(cat, "bienvenue")
-            )
+            ch = find_text_by_slug(cat, "bienvenue")
             if ch and ch.permissions_for(guild.me).send_messages:
                 return await ch.send(
                     f"{member.mention} ▶️ Clique pour démarrer la vérification :",
@@ -460,7 +465,6 @@ async def send_captcha(guild: discord.Guild, member: discord.Member):
         pass
 
     return None
-
 
 # ===================== Ranks (Valorant) =====================
 TIERS = [
@@ -561,7 +565,6 @@ async def ensure_roles(guild: discord.Guild) -> Dict[str, discord.Role]:
 
 # ===================== Vocs PP =====================
 async def create_pp_voice_structure(guild: discord.Guild, cat: discord.CategoryChannel):
-    """Crée/ajuste Préparation i + Attaque/Défense (avec emojis) et applique les limites."""
     for i in range(1, PREP_PAIRS+1):
         prep = discord.utils.find(lambda vc: slug(vc.name)==slug(f"préparation {i}"), cat.voice_channels)
         if not prep:
@@ -730,13 +733,12 @@ class PanelView(discord.ui.View):
                         await m.remove_roles(key_roles["team_a"], key_roles["team_b"], reason="Match terminé")
                         removed += 1
                     except: pass
-            # Reset file + votes
+
             set_queues.queues[self.set_idx] = []
             if self.set_idx in map_votes:
                 mv = map_votes[self.set_idx]
                 mv.voters.clear(); mv.yes=0; mv.no=0; mv.locked=False
 
-            # CLEAR salon-partie-i & replanter panneaux
             chat = get_party_text_channel(guild, self.set_idx)
             if chat:
                 await purge_channel_messages(chat, keep_pins=True, limit=500)
@@ -836,10 +838,10 @@ def map_image_url(name: str) -> str:
 @dataclass
 class MapVoteState:
     current: str
-    voters: Dict[int, str] = field(default_factory=dict)  # user_id -> "yes" / "no"
+    voters: Dict[int, str] = field(default_factory=dict)
     yes: int = 0
     no: int  = 0
-    locked: bool = False  # true = acceptée
+    locked: bool = False
 
 map_votes: Dict[int, MapVoteState] = {}
 VOTE_THRESHOLD_ACCEPT = 5
@@ -950,8 +952,8 @@ class TempRoom:
     whitelist: Set[int] = field(default_factory=set)
     blacklist: Set[int] = field(default_factory=set)
 
-temp_rooms: Dict[int, TempRoom] = {}        # voice_id -> TempRoom
-delete_tasks: Dict[int, asyncio.Task] = {}  # voice_id -> task
+temp_rooms: Dict[int, TempRoom] = {}
+delete_tasks: Dict[int, asyncio.Task] = {}
 
 def staff_or_owner(member: discord.Member, room: TempRoom) -> bool:
     if member.guild_permissions.administrator: return True
@@ -1104,12 +1106,13 @@ async def start_delete_timer(guild: discord.Guild, voice_id: int):
 # ===================== Bot / setup_hook =====================
 class FiveBot(commands.Bot):
     def __init__(self): super().__init__(command_prefix="!", intents=INTENTS)
+
     async def setup_hook(self):
-        # Vues persistantes
         for i in range(1, PREP_PAIRS+1):
             self.add_view(PanelView(i))
             self.add_view(MapVoteView(i))
         self.add_view(RankButtonView())
+
         # Sync tree
         if GUILD_ID:
             gid=int(GUILD_ID)
@@ -1118,69 +1121,29 @@ class FiveBot(commands.Bot):
         else:
             await self.tree.sync()
 
+        # ✅ applique la sécu au démarrage si le serveur est déjà setup
+        try:
+            for g in self.guilds:
+                await apply_security_perms(g)
+        except Exception:
+            pass
+
 bot = FiveBot()
 
-# ===================== CAPTCHA router & /verify (après bot = ...) =====================
+# ===================== CAPTCHA router & /verify =====================
 @bot.listen("on_interaction")
 async def captcha_router(inter: discord.Interaction):
-    try:
-        if inter.type != discord.InteractionType.component:
-            return
-        cid = inter.data.get("custom_id","")
-        if not cid.startswith("cap:"):
-            return
-        parts = cid.split(":")
-        if len(parts) < 4:
-            return
-        _, action, uid_s, tag = parts
-        uid = int(uid_s)
-
-        if action == "start":
-            if htag(f"start:{uid}") != tag or inter.user.id != uid:
-                return
-            code = rand_text(CAPTCHA_CODE_LEN)
-            pos = pick_positions(CAPTCHA_CODE_LEN, 3)
-            expected = subseq(code, pos)
-            _captcha_store[uid] = {
-                "code": code, "expected": expected, "pos": pos,
-                "tries": 0, "started": time.time(), "last": 0,
-                "ttl": time.time() + CAPTCHA_TTL_SECONDS,
-            }
-            img = build_captcha_image(code)
-            file = discord.File(io.BytesIO(img), filename="captcha.png")
-            pos_txt = ", ".join(f"#{p}" for p in pos)
-            emb = discord.Embed(
-                title="Recopie uniquement ces positions",
-                description=f"Écris **{pos_txt}** du code affiché.",
-                color=0x2ecc71
-            )
-            emb.set_image(url="attachment://captcha.png")
-            v = discord.ui.View()
-            v.add_item(discord.ui.Button(
-                label="✍️ Répondre",
-                style=discord.ButtonStyle.success,
-                custom_id=f"cap:answer:{uid}:{htag(f'answer:{uid}')}"
-            ))
-            return await inter.response.send_message(embed=emb, file=file, view=v, ephemeral=True)
-
-        elif action == "answer":
-            if htag(f"answer:{uid}") != tag or inter.user.id != uid:
-                return
-            return await inter.response.send_modal(CaptchaModal(uid))
-
-    except Exception:
-        pass
+    await captcha_handle_component(inter)
 
 @bot.tree.command(description="Relancer la vérification (si tu n'as pas pu la faire).")
 async def verify(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     await send_captcha(interaction.guild, interaction.user)
     await interaction.followup.send("Vérification envoyée (DM ou salon bienvenue).", ephemeral=True)
-    
+
 # ===================== Events =====================
 @bot.event
 async def on_member_join(member: discord.Member):
-    # Rôles sécurité
     roles = await ensure_security_roles(member.guild)
     try:
         if roles["member"] in member.roles:
@@ -1190,18 +1153,17 @@ async def on_member_join(member: discord.Member):
     except discord.Forbidden:
         pass
 
-    # Lancer CAPTCHA (DM sinon auto-rôles/bienvenue)
+    # Envoie le CAPTCHA (DM sinon #bienvenue)
     await send_captcha(member.guild, member)
 
-    # Ping visible dans auto-rôles
+    # Ping visible dans #bienvenue
     try:
         cat = discord.utils.get(member.guild.categories, name=CAT_WELCOME_NAME)
         if cat:
-            ch = find_text_by_slug(cat, "auto rôles") or find_text_by_slug(cat, "auto-roles")
+            ch = find_text_by_slug(cat, "bienvenue")
             if ch and ch.permissions_for(member.guild.me).send_messages:
                 await ch.send(
-                    f"{member.mention} 👉 Clique sur **🔒 Commencer la vérification** pour débloquer le serveur. "
-                    f"Et pense à **🎯 Déclarer ton peak ELO** juste après !"
+                    f"{member.mention} 👉 Clique sur **🔒 Commencer la vérification** pour débloquer le serveur."
                 )
     except Exception:
         pass
@@ -1209,15 +1171,20 @@ async def on_member_join(member: discord.Member):
 @bot.event
 async def on_voice_state_update(member:discord.Member, before:discord.VoiceState, after:discord.VoiceState):
     guild = member.guild
+
     # Création auto dans 🍻・TAVERNE
     if after and after.channel and after.channel.name == CREATE_VOICE_NAME:
-        cat = commu_category(guild) or after.channel.category  # 👉 TAVERNE prioritaire
+        cat = commu_category(guild) or after.channel.category
         vc = await guild.create_voice_channel(f"🎤 Salon de {member.display_name}", category=cat)
-        txt = await guild.create_text_channel(f"🔧-controle-{member.name}".lower(), category=cat, overwrites={
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        })
+        txt = await guild.create_text_channel(
+            f"🔧-controle-{member.name}".lower(),
+            category=cat,
+            overwrites={
+                guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            },
+        )
         try: await member.move_to(vc)
         except: pass
         room = TempRoom(owner_id=member.id, voice_id=vc.id, text_id=txt.id)
@@ -1256,18 +1223,16 @@ async def setup(inter:discord.Interaction):
     cat_fun     = await create_category_with_channels(g, CAT_FUN_NAME,     [("🎭・conte-auteurs","text"), ("🎨・fan-art","text")])
     cat_pp      = await create_category_with_channels(g, CAT_PP_NAME,      PP_TEXT)
 
-    # Sécurité (catégories)
+    # Sécurité
     await apply_security_perms(g)
 
-    # Créateur de salons (dans PP, le bouton d'entrée)
+    # Créateur de salons (le bouton d'entrée reste dans PP)
     if not discord.utils.find(lambda c: c.name==CREATE_VOICE_NAME, cat_pp.voice_channels):
         await g.create_voice_channel(CREATE_VOICE_NAME, category=cat_pp)
 
-    # Vocs PP + textes • salon-partie-1..4
     await create_pp_voice_structure(g, cat_pp)
     await ensure_party_text_channels(g, cat_pp, count=PREP_PAIRS)
 
-    # Panneaux : file 5v5 + roulette map (détection robuste des salons-partie)
     for i in range(1, PREP_PAIRS+1):
         chat = get_party_text_channel(g, i)
         if not chat:
@@ -1275,7 +1240,6 @@ async def setup(inter:discord.Interaction):
         await ensure_panel_once(chat, panel_embed(g, i), PanelView(i))
         await ensure_mapvote_panel_once(chat, i)
 
-    # Peak ELO dans auto-rôles
     await ensure_rank_prompt_in_autoroles(g, cat_welcome)
 
     # Branding
@@ -1297,7 +1261,11 @@ async def setup(inter:discord.Interaction):
         if reg2: await post_rules_pp(reg2)
     except: pass
 
-    await inter.followup.send("✅ Setup terminé : panels 5v5 + roulette map dans `• salon-partie-1..4`, bouton peak ELO dans `🪙・auto-rôles`, créateur de salon vocal opérationnel (création dans 🍻・TAVERNE).", ephemeral=True)
+    await inter.followup.send(
+        "✅ Setup terminé : vérif dans **🐺・bienvenue**, accès verrouillé tant que Non vérifié. "
+        "Créateur de vocal OK (création dans 🍻・TAVERNE).",
+        ephemeral=True
+    )
 
 @bot.tree.command(description="Publier un party code dans le salon-partie choisi.")
 @app_commands.describe(partie="1 à 4", code="Le party code", ping_here="Ping @here ? (oui/non)")
@@ -1323,7 +1291,7 @@ async def map_seed(interaction: discord.Interaction):
     for i in range(1, PREP_PAIRS + 1):
         chat = get_party_text_channel(g, i)
         if not chat:
-            miss.append(i); 
+            miss.append(i)
             continue
         try:
             await ensure_mapvote_panel_once(chat, i)
@@ -1364,7 +1332,8 @@ async def roulette(inter:discord.Interaction):
 
 # ===================== Run =====================
 def main():
-    if not TOKEN: raise RuntimeError("DISCORD_BOT_TOKEN manquant (.env)")
+    if not TOKEN:
+        raise RuntimeError("DISCORD_BOT_TOKEN manquant (.env)")
     try:
         from keep_alive import keep_alive
         keep_alive()
