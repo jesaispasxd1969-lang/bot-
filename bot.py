@@ -3,6 +3,7 @@ import os
 import re
 import io
 import time
+import math
 import hmac
 import hashlib
 import random
@@ -33,7 +34,7 @@ PREP_PAIRS        = 4
 PREP_VOICE_LIMIT  = 10
 SIDE_VOICE_LIMIT  = 5
 
-# Créateur de salon vocal
+# Créateur de salon vocal (channel d'entrée)
 CREATE_VOICE_NAME    = "➕ Créer un salon"
 TEMP_DELETE_GRACE_S  = 60  # secondes après salon vide avant suppression
 
@@ -105,15 +106,13 @@ async def create_category_with_channels(guild: discord.Guild, name: str, items: 
     cat = discord.utils.get(guild.categories, name=name)
     if cat is None:
         cat = await guild.create_category(name, reason="Setup bot")
-
     exist_text = {c.name for c in cat.text_channels}
     exist_voice = {c.name for c in cat.voice_channels}
-
     for nm, kind in items:
         if kind == "text" and nm not in exist_text:
-            await guild.create_text_channel(nm, category=cat, reason="Setup bot")
+            await guild.create_text_channel(nm, category=cat)
         elif kind == "voice" and nm not in exist_voice:
-            await guild.create_voice_channel(nm, category=cat, reason="Setup bot")
+            await guild.create_voice_channel(nm, category=cat)
     return cat
 
 async def ensure_party_text_channels(guild: discord.Guild, cat: discord.CategoryChannel, count: int = 4):
@@ -160,19 +159,30 @@ async def ensure_security_roles(guild: discord.Guild) -> dict:
         mem = await guild.create_role(name=MEMBER_ROLE_NAME, reason="Security: Membre")
     return {"unverified": unv, "member": mem}
 
-async def lock_category(cat: discord.CategoryChannel,
-                        everyone: discord.Role,
-                        unverified: discord.Role,
-                        member: discord.Role,
-                        is_welcome: bool):
-    # Par défaut : tout le monde caché, membres OK, non vérifié dépend
-    ow = dict(cat.overwrites or {})
-    ow[everyone] = discord.PermissionOverwrite(view_channel=False)
-    ow[member]   = discord.PermissionOverwrite(view_channel=True)
+async def lock_category(
+    cat: discord.CategoryChannel,
+    everyone: discord.Role,
+    unverified: discord.Role,
+    member: discord.Role,
+    is_welcome: bool
+):
+    ow = cat.overwrites or {}
 
+    # Par défaut : personne ne voit
+    ow[everyone] = discord.PermissionOverwrite(view_channel=False)
+
+    # Membres : voient tout
+    ow[member] = discord.PermissionOverwrite(view_channel=True)
+
+    # Non vérifiés : voient UNIQUEMENT la welcome, mais ne parlent pas
     if is_welcome:
-        # Non vérifié voit la catégorie Welcome, mais on va affiner au niveau salons
-        ow[unverified] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
+        ow[unverified] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=False,
+            add_reactions=False,
+            read_message_history=True,
+            use_application_commands=True
+        )
     else:
         ow[unverified] = discord.PermissionOverwrite(view_channel=False)
 
@@ -183,40 +193,28 @@ async def apply_security_perms(guild: discord.Guild):
     unv, mem = roles["unverified"], roles["member"]
     everyone = guild.default_role
 
-    welcome = discord.utils.get(guild.categories, name=CAT_WELCOME_NAME)
-    commu   = discord.utils.get(guild.categories, name=CAT_COMMU_NAME)
-    fun     = discord.utils.get(guild.categories, name=CAT_FUN_NAME)
-    pp      = discord.utils.get(guild.categories, name=CAT_PP_NAME)
+    def cat_by_name(name: str) -> Optional[discord.CategoryChannel]:
+        return discord.utils.get(guild.categories, name=name)
+
+    welcome = cat_by_name(CAT_WELCOME_NAME)
+    commu   = cat_by_name(CAT_COMMU_NAME)
+    fun     = cat_by_name(CAT_FUN_NAME)
+    pp      = cat_by_name(CAT_PP_NAME)
 
     if welcome: await lock_category(welcome, everyone, unv, mem, is_welcome=True)
     for c in [commu, fun, pp]:
         if c: await lock_category(c, everyone, unv, mem, is_welcome=False)
 
-    # 🔒 Affinage : dans Welcome, "Non vérifié" ne peut utiliser QUE #🐺・bienvenue
-    if welcome:
-        ch_bienvenue = discord.utils.get(welcome.text_channels, name="🐺・bienvenue")
-        ch_reglement = discord.utils.get(welcome.text_channels, name="🕯️・règlement")
-
-        for ch in welcome.text_channels:
-            ow = dict(ch.overwrites or {})
-            if ch == ch_bienvenue:
-                ow[unv] = discord.PermissionOverwrite(view_channel=True, send_messages=True, add_reactions=True, read_message_history=True)
-            elif ch == ch_reglement:
-                # lecture autorisée, pas d’écriture
-                ow[unv] = discord.PermissionOverwrite(view_channel=True, send_messages=False, add_reactions=False, read_message_history=True)
-            else:
-                ow[unv] = discord.PermissionOverwrite(view_channel=False)
-            await ch.edit(overwrites=ow, reason="Security: lock welcome channels for unverified")
-
-# ===================== CAPTCHA (simple, fiable) =====================
+# ===================== CAPTCHA (simple + lisible + dans BIENVENUE) =====================
 CAPTCHA_ATTEMPTS      = 3
 CAPTCHA_CODE_LEN      = 6
-HUMAN_MIN_SECONDS     = 1.2
-RETRY_COOLDOWN        = 4.0
+HUMAN_MIN_SECONDS     = 1.0
+RETRY_COOLDOWN        = 3.0
 CAPTCHA_TTL_SECONDS   = 15 * 60
 ALPHABET              = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
-_captcha_store: Dict[int, dict] = {}
+# store: (guild_id, user_id) -> state
+_captcha_store: Dict[tuple, dict] = {}
 _SECRET = hashlib.sha256(str(random.random()).encode()).digest()
 
 def now() -> float:
@@ -230,15 +228,15 @@ def rand_text(n: int) -> str:
 
 def cleanup_captcha_store():
     t = now()
-    for uid in list(_captcha_store.keys()):
-        st = _captcha_store.get(uid)
+    for key in list(_captcha_store.keys()):
+        st = _captcha_store.get(key)
         if not st:
             continue
         if st.get("ttl", 0) <= t:
-            _captcha_store.pop(uid, None)
+            _captcha_store.pop(key, None)
 
 def _font_simple():
-    for f, size in [("DejaVuSans-Bold.ttf", 52), ("DejaVuSans.ttf", 52), ("arial.ttf", 52)]:
+    for f, size in [("DejaVuSans-Bold.ttf", 56), ("DejaVuSans.ttf", 56), ("arial.ttf", 56)]:
         try:
             return ImageFont.truetype(f, size)
         except:
@@ -246,24 +244,28 @@ def _font_simple():
     return ImageFont.load_default()
 
 def build_captcha_image(code: str) -> bytes:
-    W, H = 360, 130
+    W, H = 380, 140
     img = Image.new("RGB", (W, H), (245, 245, 245))
     d = ImageDraw.Draw(img)
     font = _font_simple()
 
+    # lignes discrètes
     for _ in range(3):
         y = random.randint(20, H - 20)
-        d.line((10, y, W - 10, y), fill=(185, 185, 185), width=2)
+        d.line((10, y, W - 10, y), fill=(190, 190, 190), width=2)
 
+    # petits points
     for _ in range(120):
         d.point((random.randint(0, W - 1), random.randint(0, H - 1)), fill=(210, 210, 210))
 
+    # code centré, très lisible
     bbox = d.textbbox((0, 0), code, font=font)
     tw = bbox[2] - bbox[0]
     th = bbox[3] - bbox[1]
     x = (W - tw) // 2
     y = (H - th) // 2 - 2
 
+    # léger jitter par caractère (humain ok)
     for ch in code:
         dx = random.randint(-2, 2)
         dy = random.randint(-2, 2)
@@ -280,7 +282,6 @@ def build_captcha_image(code: str) -> bytes:
         x += cw + 10
 
     img = img.filter(ImageFilter.SHARPEN)
-
     b = io.BytesIO()
     img.save(b, "PNG", optimize=True)
     b.seek(0)
@@ -289,27 +290,29 @@ def build_captcha_image(code: str) -> bytes:
 class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
     answer = discord.ui.TextInput(
         label="Recopie le code (MAJUSCULES, sans espace)",
-        placeholder="Ex: A9U6UG",
+        placeholder="Ex: 7K8P2Q",
         max_length=16,
         required=True,
     )
 
-    def __init__(self, uid: int):
+    def __init__(self, guild_id: int, uid: int):
         super().__init__()
+        self.guild_id = guild_id
         self.uid = uid
 
     async def on_submit(self, inter: discord.Interaction):
         cleanup_captcha_store()
-        st = _captcha_store.get(self.uid)
+        key = (self.guild_id, self.uid)
+        st = _captcha_store.get(key)
         if not st:
-            return await inter.response.send_message("CAPTCHA expiré. Relance **/verify**.", ephemeral=True)
+            return await inter.response.send_message("CAPTCHA expiré. Clique à nouveau sur **🔒 Commencer**.", ephemeral=True)
 
         t = now()
         if t - st["started"] < HUMAN_MIN_SECONDS:
-            return await inter.response.send_message("Trop rapide 😅 Réessaie dans 2 secondes.", ephemeral=True)
+            return await inter.response.send_message("Trop rapide 😅 Réessaie dans 1 seconde.", ephemeral=True)
 
         if t - st["last"] < RETRY_COOLDOWN:
-            left = int(RETRY_COOLDOWN - (t - st["last"]))
+            left = max(1, int(RETRY_COOLDOWN - (t - st["last"])))
             return await inter.response.send_message(f"Cooldown… attends **{left}s**.", ephemeral=True)
 
         st["last"] = t
@@ -317,16 +320,14 @@ class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
 
         got = self.answer.value.strip().upper().replace(" ", "")
         if got == st["expected"]:
-            _captcha_store.pop(self.uid, None)
+            _captcha_store.pop(key, None)
 
             roles = await ensure_security_roles(inter.guild)
-            # retire Non vérifié
             try:
                 if roles["unverified"] in inter.user.roles:
                     await inter.user.remove_roles(roles["unverified"], reason="Captcha validé")
             except discord.Forbidden:
                 pass
-            # ajoute Membre
             try:
                 if roles["member"] not in inter.user.roles:
                     await inter.user.add_roles(roles["member"], reason="Captcha validé")
@@ -336,50 +337,49 @@ class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
             return await inter.response.send_message("✅ Vérifié ! Bienvenue.", ephemeral=True)
 
         if st["tries"] >= CAPTCHA_ATTEMPTS:
-            _captcha_store.pop(self.uid, None)
-            return await inter.response.send_message("❌ Trop d'essais. Relance **/verify** plus tard.", ephemeral=True)
+            _captcha_store.pop(key, None)
+            return await inter.response.send_message("❌ Trop d'essais. Clique sur **🔒 Commencer** pour un nouveau code.", ephemeral=True)
 
         left = CAPTCHA_ATTEMPTS - st["tries"]
-        return await inter.response.send_message(f"❌ Mauvais code. Essais restants : **{left}**.", ephemeral=True)
+        await inter.response.send_message(f"❌ Mauvais code. Essais restants : **{left}**.", ephemeral=True)
 
 class CaptchaStartView(discord.ui.View):
-    def __init__(self, uid: int):
+    def __init__(self, guild_id: int, uid: int):
         super().__init__(timeout=None)
+        self.guild_id = guild_id
         self.uid = uid
         self.add_item(
             discord.ui.Button(
                 label="🔒 Commencer la vérification",
                 style=discord.ButtonStyle.primary,
-                custom_id=f"cap:start:{uid}:{htag(f'start:{uid}')}",
+                custom_id=f"cap:start:{guild_id}:{uid}:{htag(f'start:{guild_id}:{uid}')}"
             )
         )
 
-async def send_captcha(guild: discord.Guild, member: discord.Member):
+async def send_captcha_in_bienvenue(guild: discord.Guild, member: discord.Member):
+    """
+    Envoie UNIQUEMENT dans #🐺・bienvenue (pas DM, pas auto-rôles).
+    """
     cleanup_captcha_store()
-    view = CaptchaStartView(member.id)
+    cat = discord.utils.get(guild.categories, name=CAT_WELCOME_NAME)
+    if not cat:
+        return None
 
-    # 1) DM si possible
-    try:
-        return await member.send(
-            "Bienvenue ! Pour accéder au serveur, clique ci-dessous pour te vérifier :",
-            view=view,
-        )
-    except discord.Forbidden:
-        pass
+    ch = find_text_by_slug(cat, "bienvenue")
+    if not ch:
+        # fallback: si pas trouvé, on prend le 1er salon texte de la cat
+        ch = cat.text_channels[0] if cat.text_channels else None
+    if not ch:
+        return None
 
-    # 2) fallback : poste dans 🐺・bienvenue (pas auto-rôles)
-    try:
-        cat = discord.utils.get(guild.categories, name=CAT_WELCOME_NAME)
-        if cat:
-            ch = discord.utils.get(cat.text_channels, name="🐺・bienvenue") or find_text_by_slug(cat, "bienvenue")
-            if ch and ch.permissions_for(guild.me).send_messages:
-                return await ch.send(
-                    f"{member.mention} ▶️ Clique pour démarrer la vérification :",
-                    view=view,
-                )
-    except Exception:
-        pass
-    return None
+    if not ch.permissions_for(guild.me).send_messages:
+        return None
+
+    view = CaptchaStartView(guild.id, member.id)
+    return await ch.send(
+        f"{member.mention} 🐺 **Bienvenue !** Clique sur le bouton pour te vérifier :",
+        view=view
+    )
 
 # ===================== Ranks (Valorant) =====================
 TIERS = [
@@ -474,7 +474,15 @@ async def ensure_roles(guild: discord.Guild) -> Dict[str, discord.Role]:
                     await role.edit(permissions=perms, reason="Update role perms")
             except discord.Forbidden:
                 pass
-        key = {"Admin":"admin","Orga PP":"orga","Staff":"staff","Joueur":"joueur","Spectateur":"spectateur","Équipe Attaque":"team_a","Équipe Défense":"team_b"}[name]
+        key = {
+            "Admin":"admin",
+            "Orga PP":"orga",
+            "Staff":"staff",
+            "Joueur":"joueur",
+            "Spectateur":"spectateur",
+            "Équipe Attaque":"team_a",
+            "Équipe Défense":"team_b"
+        }[name]
         out[key] = role
     return out
 
@@ -489,36 +497,47 @@ async def create_pp_voice_structure(guild: discord.Guild, cat: discord.CategoryC
             except discord.Forbidden: pass
 
         _, atk, defn = find_group_channels_for_set(guild, i)
-
         if not atk:
             await guild.create_voice_channel("⚔ · Attaque", category=cat, user_limit=SIDE_VOICE_LIMIT)
         else:
-            try:
-                await atk.edit(name="⚔ · Attaque", user_limit=SIDE_VOICE_LIMIT)
+            if not has_attack(atk.name):
+                try: await atk.edit(name="⚔ · Attaque")
+                except: pass
+            try: await atk.edit(user_limit=SIDE_VOICE_LIMIT)
             except: pass
 
         if not defn:
             await guild.create_voice_channel("🛡 · Défense", category=cat, user_limit=SIDE_VOICE_LIMIT)
         else:
-            try:
-                await defn.edit(name="🛡 · Défense", user_limit=SIDE_VOICE_LIMIT)
+            if not has_defense(defn.name):
+                try: await defn.edit(name="🛡 · Défense")
+                except: pass
+            try: await defn.edit(user_limit=SIDE_VOICE_LIMIT)
             except: pass
 
 # ===================== File 5v5 & Panneau =====================
 class SetQueues:
-    def __init__(self): self.queues: Dict[int, List[int]] = {i: [] for i in range(1, PREP_PAIRS+1)}
+    def __init__(self):
+        self.queues: Dict[int, List[int]] = {i: [] for i in range(1, PREP_PAIRS+1)}
+
     def join(self, i:int, uid:int)->bool:
         q=self.queues[i]
         if uid in q: return False
         q.append(uid); return True
+
     def leave(self,i:int,uid:int)->bool:
         q=self.queues[i]
         if uid not in q: return False
         q.remove(uid); return True
-    def ready(self,i:int)->bool: return len(self.queues[i])>=10
+
+    def ready(self,i:int)->bool:
+        return len(self.queues[i])>=10
+
     def pop10(self,i:int)->List[int]:
         q=self.queues[i]; p=q[:10]; self.queues[i]=q[10:]; return p
-    def list(self,i:int)->List[int]: return list(self.queues[i])
+
+    def list(self,i:int)->List[int]:
+        return list(self.queues[i])
 
 set_queues = SetQueues()
 
@@ -528,7 +547,11 @@ def panel_embed(guild:discord.Guild,i:int)->discord.Embed:
     for uid in ids:
         m=guild.get_member(uid)
         mentions.append(m.mention if m else f"`{uid}`")
-    em=discord.Embed(title=f"Préparation {i} — File 5v5", description="Rejoins la file et lance une partie équilibrée.", color=0x5865F2)
+    em=discord.Embed(
+        title=f"Préparation {i} — File 5v5",
+        description="Rejoins la file et lance une partie équilibrée.",
+        color=0x5865F2
+    )
     em.add_field(name=f"Joueurs ({len(ids)}/10)", value=", ".join(mentions) if mentions else "—", inline=False)
     em.set_footer(text="Boutons: Rejoindre • Quitter • Lancer • Finir")
     return em
@@ -539,10 +562,13 @@ async def ensure_panel_once(chat:discord.TextChannel, embed:discord.Embed, view:
         for m in pins:
             if m.author==chat.guild.me and m.embeds and m.embeds[0].title==embed.title:
                 return
-    except: pass
+    except:
+        pass
+
     async for m in chat.history(limit=30):
         if m.author==chat.guild.me and m.embeds and m.embeds[0].title==embed.title:
             return
+
     msg = await chat.send(embed=embed, view=view)
     try: await msg.pin()
     except: pass
@@ -557,8 +583,199 @@ async def purge_channel_messages(chat: discord.TextChannel, keep_pins: bool = Tr
     pinned_ids = {m.id for m in pins}
     try:
         await chat.purge(limit=limit, check=(lambda m: m.id not in pinned_ids))
+    except discord.Forbidden:
+        pass
+    except Exception:
+        pass
+
+class PanelView(discord.ui.View):
+    def __init__(self,set_idx:int):
+        super().__init__(timeout=None)
+        self.set_idx=set_idx
+
+        b_join  = discord.ui.Button(label="✅ Rejoindre", style=discord.ButtonStyle.success,   custom_id=f"panel:join:{set_idx}")
+        b_leave = discord.ui.Button(label="🚪 Quitter",  style=discord.ButtonStyle.secondary, custom_id=f"panel:leave:{set_idx}")
+        b_start = discord.ui.Button(label="🚀 Lancer la partie", style=discord.ButtonStyle.primary, custom_id=f"panel:start:{set_idx}")
+        b_end   = discord.ui.Button(label="🧹 Finir la partie",  style=discord.ButtonStyle.danger,  custom_id=f"panel:end:{set_idx}")
+
+        async def cb_join(inter:discord.Interaction):
+            if not set_queues.join(self.set_idx, inter.user.id):
+                return await inter.response.send_message("Tu es déjà dans la file.", ephemeral=True)
+            await inter.response.send_message(f"Tu as rejoint la file (Préparation {self.set_idx}).", ephemeral=True)
+            try: await inter.message.edit(embed=panel_embed(inter.guild,self.set_idx), view=self)
+            except: pass
+
+        async def cb_leave(inter:discord.Interaction):
+            if not set_queues.leave(self.set_idx, inter.user.id):
+                return await inter.response.send_message("Tu n'es pas dans la file.", ephemeral=True)
+            await inter.response.send_message("Tu as quitté la file.", ephemeral=True)
+            try: await inter.message.edit(embed=panel_embed(inter.guild,self.set_idx), view=self)
+            except: pass
+
+        async def cb_start(inter:discord.Interaction):
+            roles = {r.name.lower() for r in inter.user.roles}
+            if 'orga pp' not in roles and not inter.user.guild_permissions.administrator:
+                return await inter.response.send_message("Orga PP requis.", ephemeral=True)
+
+            await inter.response.defer(ephemeral=True)
+
+            if not set_queues.ready(self.set_idx):
+                need = 10 - len(set_queues.list(self.set_idx))
+                return await inter.followup.send(f"Il manque **{need}** joueurs.", ephemeral=True)
+
+            guild = inter.guild
+            ids = set_queues.pop10(self.set_idx)
+            members = [guild.get_member(u) for u in ids if guild.get_member(u)]
+
+            def val(m:discord.Member)->int:
+                best=0
+                for r in m.roles:
+                    if is_rank_role_name(r.name): best=max(best, rank_value(r.name))
+                return best
+
+            scored=sorted([(m,val(m)) for m in members], key=lambda x:x[1], reverse=True)
+            A,B=[],[]; sa=sb=0
+            for m,v in scored:
+                if sa<=sb: A.append(m); sa+=v
+                else: B.append(m); sb+=v
+
+            key_roles = await ensure_roles(guild)
+            roleA, roleB = key_roles["team_a"], key_roles["team_b"]
+            _, atk, defn = find_group_channels_for_set(guild, self.set_idx)
+
+            for m in A:
+                try: await m.add_roles(roleA)
+                except: pass
+                if atk and m.voice and m.voice.channel:
+                    try: await m.move_to(atk)
+                    except: pass
+            for m in B:
+                try: await m.add_roles(roleB)
+                except: pass
+                if defn and m.voice and m.voice.channel:
+                    try: await m.move_to(defn)
+                    except: pass
+
+            em=discord.Embed(title=f"Match lancé — Préparation {self.set_idx}", description="Équilibrage par peak ELO.", color=0x2ecc71)
+            em.add_field(name="Équipe Attaque", value=", ".join(m.mention for m in A) or "—", inline=False)
+            em.add_field(name="Équipe Défense", value=", ".join(m.mention for m in B) or "—", inline=False)
+            await inter.followup.send(embed=em, ephemeral=False)
+
+            try: await inter.message.edit(embed=panel_embed(guild,self.set_idx), view=self)
+            except: pass
+
+        async def cb_end(inter:discord.Interaction):
+            roles = {r.name.lower() for r in inter.user.roles}
+            if 'orga pp' not in roles and not inter.user.guild_permissions.administrator:
+                return await inter.response.send_message("Orga PP requis.", ephemeral=True)
+
+            await inter.response.defer(ephemeral=True)
+            guild = inter.guild
+            key_roles = await ensure_roles(guild)
+
+            removed = 0
+            for m in guild.members:
+                if key_roles["team_a"] in m.roles or key_roles["team_b"] in m.roles:
+                    try:
+                        await m.remove_roles(key_roles["team_a"], key_roles["team_b"], reason="Match terminé")
+                        removed += 1
+                    except: pass
+
+            set_queues.queues[self.set_idx] = []
+            if self.set_idx in map_votes:
+                mv = map_votes[self.set_idx]
+                mv.voters.clear(); mv.yes=0; mv.no=0; mv.locked=False
+
+            chat = get_party_text_channel(guild, self.set_idx)
+            if chat:
+                await purge_channel_messages(chat, keep_pins=True, limit=500)
+                await ensure_panel_once(chat, panel_embed(guild, self.set_idx), PanelView(self.set_idx))
+                await ensure_mapvote_panel_once(chat, self.set_idx)
+
+            await inter.followup.send(f"Rôles retirés de **{removed}** membres. File réinitialisée. Salon-partie nettoyé.", ephemeral=True)
+            try: await inter.message.edit(embed=panel_embed(guild,self.set_idx), view=self)
+            except: pass
+
+        b_join.callback=cb_join
+        b_leave.callback=cb_leave
+        b_start.callback=cb_start
+        b_end.callback=cb_end
+
+        self.add_item(b_join)
+        self.add_item(b_leave)
+        self.add_item(b_start)
+        self.add_item(b_end)
+
+# ===================== Embeds de base =====================
+SERVER_RULES_TEXT = """**RÈGLEMENT DU SERVEUR — ARÈNE DE KAER MORHEN**
+Respect, jeu propre, pas de triche/ghost, pubs limitées, décisions Orga PP/Staff priment.
+Le détail des règles PP est dans `📜・règlement-pp`. Bon jeu 🐺 !
+"""
+PP_RULES_TEXT = """**RÈGLEMENT PARTIES PERSO — VALORANT**
+Fair-play, pas de triche, vocal Attaque/Défense, party-code privé, sanctions graduées.
+"""
+
+async def post_server_rules(ch:discord.TextChannel):
+    try:
+        msg = await ch.send(SERVER_RULES_TEXT)
+        try: await msg.pin()
+        except: pass
+    except: pass
+
+async def post_rules_pp(ch:discord.TextChannel):
+    try:
+        msg = await ch.send(PP_RULES_TEXT)
+        try: await msg.pin()
+        except: pass
+    except: pass
+
+# ===================== Peak ELO dans auto-rôles =====================
+class RankModal(discord.ui.Modal, title="Déclare ton peak ELO (VALORANT)"):
+    rank_input = discord.ui.TextInput(
+        label="Ex: Silver 1, Asc 1, Immortal 2, Radiant",
+        placeholder="asc 1",
+        required=True,
+        max_length=32
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        disp = normalize_rank(str(self.rank_input.value))
+        if not disp:
+            return await interaction.response.send_message("Format invalide. Ex: `Silver 1`, `Asc 1`, `Radiant`.", ephemeral=True)
+        await apply_rank_role(interaction.guild, interaction.user, disp)
+        await interaction.response.send_message(f"✅ Peak enregistré : **{disp}**", ephemeral=True)
+
+class RankButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🎯 Déclarer mon peak ELO", style=discord.ButtonStyle.primary, custom_id="rank:open")
+    async def open(self, interaction:discord.Interaction, button:discord.ui.Button):
+        await interaction.response.send_modal(RankModal())
+
+async def ensure_rank_prompt_in_autoroles(guild:discord.Guild, cat_welcome:discord.CategoryChannel):
+    ch = find_text_by_slug(cat_welcome, "auto-rôles") or find_text_by_slug(cat_welcome, "auto rôles") or find_text_by_slug(cat_welcome, "auto-roles")
+    if not ch: return
+
+    try:
+        for m in await ch.pins():
+            if m.author==guild.me and m.components:
+                return
     except:
         pass
+
+    async for m in ch.history(limit=25):
+        if m.author==guild.me and m.components:
+            return
+
+    em = discord.Embed(
+        title="🎯 Peak ELO — Valorant",
+        description="Clique pour déclarer ton **peak ELO** et recevoir ton rôle.",
+        color=0x5865F2
+    )
+    msg = await ch.send(embed=em, view=RankButtonView())
+    try: await msg.pin()
+    except: pass
 
 # ===================== Roulette map + votes =====================
 VALORANT_MAPS = [
@@ -580,6 +797,7 @@ MAP_IMAGE: Dict[str, str] = {
     "Fracture": "https://c-valorant-api.op.gg/Assets/Maps/B529448B-4D60-346E-E89E-00A4C527A405_splash.png?image=q_auto:good,f_webp&v=1760610922",
     "Bind":     "https://c-valorant-api.op.gg/Assets/Maps/2C9D57EC-4431-9C5E-2939-8F9EF6DD5CBA_splash.png?image=q_auto:good,f_webp&v=1760610922",
 }
+
 MAP_ALIASES: Dict[str, str] = {"abysse": "Abyss", "corode": "Corrode", "ice box": "Icebox"}
 
 def map_image_url(name: str) -> str:
@@ -627,7 +845,9 @@ class MapVoteView(discord.ui.View):
         b_reroll = discord.ui.Button(label="🎲 Relancer (Orga)", style=discord.ButtonStyle.secondary, custom_id=f"mapvote:reroll:{set_idx}")
 
         async def cb_yes(inter: discord.Interaction):
-            state = map_votes.get(self.set_idx) or (map_votes.setdefault(self.set_idx, MapVoteState(current=roll_random_map())))
+            state = map_votes.get(self.set_idx)
+            if not state:
+                state = map_votes[self.set_idx] = MapVoteState(current=roll_random_map())
             if state.locked:
                 return await inter.response.send_message("La map est déjà acceptée.", ephemeral=True)
             uid = inter.user.id
@@ -637,34 +857,45 @@ class MapVoteView(discord.ui.View):
             if state.yes >= VOTE_THRESHOLD_ACCEPT:
                 state.locked = True
             await inter.response.edit_message(embed=build_map_embed(self.set_idx, state), view=self)
+            await inter.followup.send("Vote enregistré ✅", ephemeral=True)
 
         async def cb_no(inter: discord.Interaction):
-            state = map_votes.get(self.set_idx) or (map_votes.setdefault(self.set_idx, MapVoteState(current=roll_random_map())))
+            state = map_votes.get(self.set_idx)
+            if not state:
+                state = map_votes[self.set_idx] = MapVoteState(current=roll_random_map())
             if state.locked:
                 return await inter.response.send_message("La map est déjà acceptée.", ephemeral=True)
             uid = inter.user.id
             if uid in state.voters:
                 return await inter.response.send_message("Tu as déjà voté.", ephemeral=True)
             state.voters[uid] = "no"; state.no += 1
+            rerolled = False
             if state.no >= VOTE_THRESHOLD_REJECT:
                 old = state.current
                 state.current = roll_random_map(exclude=old)
                 state.voters.clear(); state.yes = 0; state.no = 0; state.locked = False
+                rerolled = True
             await inter.response.edit_message(embed=build_map_embed(self.set_idx, state), view=self)
+            await inter.followup.send(
+                "❌ Refusé (5 non). 🎲 Nouvelle map proposée !" if rerolled else "Vote enregistré ❌",
+                ephemeral=True
+            )
 
         async def cb_reroll(inter: discord.Interaction):
             if not (inter.user.guild_permissions.administrator or any(r.name.lower()=="orga pp" for r in inter.user.roles)):
                 return await inter.response.send_message("Réservé aux **Orga PP** / Admin.", ephemeral=True)
-            state = map_votes.get(self.set_idx) or (map_votes.setdefault(self.set_idx, MapVoteState(current=roll_random_map())))
+            state = map_votes.get(self.set_idx)
+            if not state:
+                state = map_votes[self.set_idx] = MapVoteState(current=roll_random_map())
             old = state.current
             state.current = roll_random_map(exclude=old)
             state.voters.clear(); state.yes = 0; state.no = 0; state.locked = False
             await inter.response.edit_message(embed=build_map_embed(self.set_idx, state), view=self)
+            await inter.followup.send("🎲 Nouvelle map proposée.", ephemeral=True)
 
         b_yes.callback = cb_yes
         b_no.callback  = cb_no
         b_reroll.callback = cb_reroll
-
         self.add_item(b_yes); self.add_item(b_no); self.add_item(b_reroll)
 
 async def ensure_mapvote_panel_once(chat: discord.TextChannel, set_idx: int):
@@ -682,152 +913,6 @@ async def ensure_mapvote_panel_once(chat: discord.TextChannel, set_idx: int):
     try: await msg.pin()
     except: pass
 
-# ===================== Panel 5v5 (avec clear) =====================
-class PanelView(discord.ui.View):
-    def __init__(self,set_idx:int):
-        super().__init__(timeout=None)
-        self.set_idx=set_idx
-
-        b_join  = discord.ui.Button(label="✅ Rejoindre", style=discord.ButtonStyle.success,   custom_id=f"panel:join:{set_idx}")
-        b_leave = discord.ui.Button(label="🚪 Quitter",  style=discord.ButtonStyle.secondary, custom_id=f"panel:leave:{set_idx}")
-        b_start = discord.ui.Button(label="🚀 Lancer la partie", style=discord.ButtonStyle.primary, custom_id=f"panel:start:{set_idx}")
-        b_end   = discord.ui.Button(label="🧹 Finir la partie",  style=discord.ButtonStyle.danger,  custom_id=f"panel:end:{set_idx}")
-
-        async def cb_join(inter:discord.Interaction):
-            if not set_queues.join(self.set_idx, inter.user.id):
-                return await inter.response.send_message("Tu es déjà dans la file.", ephemeral=True)
-            await inter.response.send_message(f"Tu as rejoint la file (Préparation {self.set_idx}).", ephemeral=True)
-            try: await inter.message.edit(embed=panel_embed(inter.guild,self.set_idx), view=self)
-            except: pass
-
-        async def cb_leave(inter:discord.Interaction):
-            if not set_queues.leave(self.set_idx, inter.user.id):
-                return await inter.response.send_message("Tu n'es pas dans la file.", ephemeral=True)
-            await inter.response.send_message("Tu as quitté la file.", ephemeral=True)
-            try: await inter.message.edit(embed=panel_embed(inter.guild,self.set_idx), view=self)
-            except: pass
-
-        async def cb_start(inter:discord.Interaction):
-            roles = {r.name.lower() for r in inter.user.roles}
-            if 'orga pp' not in roles and not inter.user.guild_permissions.administrator:
-                return await inter.response.send_message("Orga PP requis.", ephemeral=True)
-
-            await inter.response.defer(ephemeral=True)
-            if not set_queues.ready(self.set_idx):
-                need = 10 - len(set_queues.list(self.set_idx))
-                return await inter.followup.send(f"Il manque **{need}** joueurs.", ephemeral=True)
-
-            guild = inter.guild
-            ids = set_queues.pop10(self.set_idx)
-            members = [guild.get_member(u) for u in ids if guild.get_member(u)]
-
-            def val(m:discord.Member)->int:
-                best=0
-                for r in m.roles:
-                    if is_rank_role_name(r.name):
-                        best=max(best, rank_value(r.name))
-                return best
-
-            scored=sorted([(m,val(m)) for m in members], key=lambda x:x[1], reverse=True)
-            A,B=[],[]; sa=sb=0
-            for m,v in scored:
-                if sa<=sb: A.append(m); sa+=v
-                else: B.append(m); sb+=v
-
-            key_roles = await ensure_roles(guild)
-            roleA, roleB = key_roles["team_a"], key_roles["team_b"]
-            _, atk, defn = find_group_channels_for_set(guild, self.set_idx)
-
-            for m in A:
-                try: await m.add_roles(roleA)
-                except: pass
-                if atk and m.voice and m.voice.channel:
-                    try: await m.move_to(atk)
-                    except: pass
-            for m in B:
-                try: await m.add_roles(roleB)
-                except: pass
-                if defn and m.voice and m.voice.channel:
-                    try: await m.move_to(defn)
-                    except: pass
-
-            em=discord.Embed(title=f"Match lancé — Préparation {self.set_idx}", description="Équilibrage par peak ELO.", color=0x2ecc71)
-            em.add_field(name="Équipe Attaque", value=", ".join(m.mention for m in A) or "—", inline=False)
-            em.add_field(name="Équipe Défense", value=", ".join(m.mention for m in B) or "—", inline=False)
-            await inter.followup.send(embed=em, ephemeral=True)
-
-            try: await inter.message.edit(embed=panel_embed(guild,self.set_idx), view=self)
-            except: pass
-
-        async def cb_end(inter:discord.Interaction):
-            roles = {r.name.lower() for r in inter.user.roles}
-            if 'orga pp' not in roles and not inter.user.guild_permissions.administrator:
-                return await inter.response.send_message("Orga PP requis.", ephemeral=True)
-            await inter.response.defer(ephemeral=True)
-
-            guild = inter.guild
-            key_roles = await ensure_roles(guild)
-
-            removed = 0
-            for m in guild.members:
-                if key_roles["team_a"] in m.roles or key_roles["team_b"] in m.roles:
-                    try:
-                        await m.remove_roles(key_roles["team_a"], key_roles["team_b"], reason="Match terminé")
-                        removed += 1
-                    except: pass
-
-            # reset file + reset map votes
-            set_queues.queues[self.set_idx] = []
-            if self.set_idx in map_votes:
-                mv = map_votes[self.set_idx]
-                mv.voters.clear(); mv.yes=0; mv.no=0; mv.locked=False
-
-            # clear salon-partie-X (sauf pins)
-            chat = get_party_text_channel(guild, self.set_idx)
-            if chat:
-                await purge_channel_messages(chat, keep_pins=True, limit=500)
-                await ensure_panel_once(chat, panel_embed(guild, self.set_idx), PanelView(self.set_idx))
-                await ensure_mapvote_panel_once(chat, self.set_idx)
-
-            await inter.followup.send(f"✅ Partie terminée. Reset file + vote + nettoyage salon. ({removed} rôles retirés)", ephemeral=True)
-            try: await inter.message.edit(embed=panel_embed(guild,self.set_idx), view=self)
-            except: pass
-
-        b_join.callback=cb_join; b_leave.callback=cb_leave; b_start.callback=cb_start; b_end.callback=cb_end
-        self.add_item(b_join); self.add_item(b_leave); self.add_item(b_start); self.add_item(b_end)
-
-# ===================== Peak ELO bouton (auto-rôles) =====================
-class RankModal(discord.ui.Modal, title="Déclare ton peak ELO (VALORANT)"):
-    rank_input = discord.ui.TextInput(label="Ex: Silver 1, Asc 1, Immortal 2, Radiant", placeholder="asc 1", required=True, max_length=32)
-    async def on_submit(self, interaction: discord.Interaction):
-        disp = normalize_rank(str(self.rank_input.value))
-        if not disp:
-            return await interaction.response.send_message("Format invalide. Ex: `Silver 1`, `Asc 1`, `Radiant`.", ephemeral=True)
-        await apply_rank_role(interaction.guild, interaction.user, disp)
-        await interaction.response.send_message(f"✅ Peak enregistré : **{disp}**", ephemeral=True)
-
-class RankButtonView(discord.ui.View):
-    def __init__(self): super().__init__(timeout=None)
-    @discord.ui.button(label="🎯 Déclarer mon peak ELO", style=discord.ButtonStyle.primary, custom_id="rank:open")
-    async def open(self, interaction:discord.Interaction, button:discord.ui.Button):
-        await interaction.response.send_modal(RankModal())
-
-async def ensure_rank_prompt_in_autoroles(guild:discord.Guild, cat_welcome:discord.CategoryChannel):
-    ch = find_text_by_slug(cat_welcome, "auto rôles") or find_text_by_slug(cat_welcome, "auto-roles")
-    if not ch: return
-    try:
-        for m in await ch.pins():
-            if m.author==guild.me and m.components:
-                return
-    except: pass
-    async for m in ch.history(limit=25):
-        if m.author==guild.me and m.components:
-            return
-    em = discord.Embed(title="🎯 Peak ELO — Valorant", description="Clique pour déclarer ton **peak ELO** et recevoir ton rôle.", color=0x5865F2)
-    msg = await ch.send(embed=em, view=RankButtonView())
-    try: await msg.pin()
-    except: pass
-
 # ===================== Temp voice (création dans TAVERNE) =====================
 @dataclass
 class TempRoom:
@@ -839,8 +924,8 @@ class TempRoom:
     whitelist: Set[int] = field(default_factory=set)
     blacklist: Set[int] = field(default_factory=set)
 
-temp_rooms: Dict[int, TempRoom] = {}
-delete_tasks: Dict[int, asyncio.Task] = {}
+temp_rooms: Dict[int, TempRoom] = {}        # voice_id -> TempRoom
+delete_tasks: Dict[int, asyncio.Task] = {}  # voice_id -> task
 
 def staff_or_owner(member: discord.Member, room: TempRoom) -> bool:
     if member.guild_permissions.administrator: return True
@@ -865,9 +950,9 @@ class VoiceControlView(discord.ui.View):
         if not vc or not room: return
         if not staff_or_owner(interaction.user, room):
             return await interaction.response.send_message("Réservé au créateur/Orga PP.", ephemeral=True)
-        ow = dict(vc.overwrites or {})
-        ow[interaction.guild.default_role] = discord.PermissionOverwrite(connect=False)
-        await vc.edit(overwrites=ow, reason="VC private")
+        overwrites = vc.overwrites
+        overwrites[interaction.guild.default_role] = discord.PermissionOverwrite(connect=False)
+        await vc.edit(overwrites=overwrites, reason="VC private")
         room.private = True
         await interaction.response.send_message("Salon **privé**.", ephemeral=True)
 
@@ -877,11 +962,118 @@ class VoiceControlView(discord.ui.View):
         if not vc or not room: return
         if not staff_or_owner(interaction.user, room):
             return await interaction.response.send_message("Réservé au créateur/Orga PP.", ephemeral=True)
-        ow = dict(vc.overwrites or {})
-        ow[interaction.guild.default_role] = discord.PermissionOverwrite(connect=True)
-        await vc.edit(overwrites=ow, reason="VC public")
+        overwrites = vc.overwrites
+        overwrites[interaction.guild.default_role] = discord.PermissionOverwrite(connect=True)
+        await vc.edit(overwrites=overwrites, reason="VC public")
         room.private = False
         await interaction.response.send_message("Salon **public**.", ephemeral=True)
+
+    @discord.ui.button(label="👥 Limite", style=discord.ButtonStyle.secondary, custom_id="vc:limit")
+    async def set_limit(self, interaction:discord.Interaction, _:discord.ui.Button):
+        vc, room = await self._resolve(interaction)
+        if not vc or not room: return
+        if not staff_or_owner(interaction.user, room):
+            return await interaction.response.send_message("Réservé au créateur/Orga PP.", ephemeral=True)
+
+        class LimitModal(discord.ui.Modal, title="Fixer une limite (0 = illimité)"):
+            value = discord.ui.TextInput(label="Nombre", placeholder="0..99", required=True, max_length=2)
+
+            async def on_submit(self, inter: discord.Interaction):
+                try:
+                    n = int(str(self.value))
+                    n = max(0, min(99, n))
+                except:
+                    return await inter.response.send_message("Nombre invalide.", ephemeral=True)
+                try: await vc.edit(user_limit=n)
+                except: pass
+                room.limit = n
+                await inter.response.send_message(f"Limite fixée à **{n}**.", ephemeral=True)
+
+        await interaction.response.send_modal(LimitModal())
+
+    @discord.ui.button(label="✅ Whitelist+", style=discord.ButtonStyle.success, custom_id="vc:wl_add")
+    async def wl_add(self, interaction:discord.Interaction, _:discord.ui.Button):
+        vc, room = await self._resolve(interaction)
+        if not vc or not room: return
+        if not staff_or_owner(interaction.user, room):
+            return await interaction.response.send_message("Réservé au créateur/Orga PP.", ephemeral=True)
+
+        class AddModal(discord.ui.Modal, title="Ajouter à la whitelist"):
+            user = discord.ui.TextInput(label="ID ou @mention", required=True)
+
+            async def on_submit(self, inter:discord.Interaction):
+                m = re.findall(r"\d{15,20}", str(self.user))
+                if not m:
+                    return await inter.response.send_message("Utilisateur invalide.", ephemeral=True)
+                room.whitelist.add(int(m[0]))
+                await inter.response.send_message("Ajouté à la whitelist.", ephemeral=True)
+
+        await interaction.response.send_modal(AddModal())
+
+    @discord.ui.button(label="🗑️ Whitelist-", style=discord.ButtonStyle.secondary, custom_id="vc:wl_del")
+    async def wl_del(self, interaction:discord.Interaction, _:discord.ui.Button):
+        vc, room = await self._resolve(interaction)
+        if not vc or not room: return
+        if not staff_or_owner(interaction.user, room):
+            return await interaction.response.send_message("Réservé au créateur/Orga PP.", ephemeral=True)
+
+        class DelModal(discord.ui.Modal, title="Retirer de la whitelist"):
+            user = discord.ui.TextInput(label="ID ou @mention", required=True)
+
+            async def on_submit(self, inter:discord.Interaction):
+                m = re.findall(r"\d{15,20}", str(self.user))
+                if not m:
+                    return await inter.response.send_message("Utilisateur invalide.", ephemeral=True)
+                room.whitelist.discard(int(m[0]))
+                await inter.response.send_message("Retiré de la whitelist.", ephemeral=True)
+
+        await interaction.response.send_modal(DelModal())
+
+    @discord.ui.button(label="⛔ Blacklist+", style=discord.ButtonStyle.danger, custom_id="vc:bl_add")
+    async def bl_add(self, interaction:discord.Interaction, _:discord.ui.Button):
+        vc, room = await self._resolve(interaction)
+        if not vc or not room: return
+        if not staff_or_owner(interaction.user, room):
+            return await interaction.response.send_message("Réservé au créateur/Orga PP.", ephemeral=True)
+
+        class AddModal(discord.ui.Modal, title="Ajouter à la blacklist"):
+            user = discord.ui.TextInput(label="ID ou @mention", required=True)
+
+            async def on_submit(self, inter:discord.Interaction):
+                m = re.findall(r"\d{15,20}", str(self.user))
+                if not m:
+                    return await inter.response.send_message("Utilisateur invalide.", ephemeral=True)
+                room.blacklist.add(int(m[0]))
+                await inter.response.send_message("Ajouté à la blacklist.", ephemeral=True)
+
+        await interaction.response.send_modal(AddModal())
+
+    @discord.ui.button(label="🧹 Blacklist-", style=discord.ButtonStyle.secondary, custom_id="vc:bl_del")
+    async def bl_del(self, interaction:discord.Interaction, _:discord.ui.Button):
+        vc, room = await self._resolve(interaction)
+        if not vc or not room: return
+        if not staff_or_owner(interaction.user, room):
+            return await interaction.response.send_message("Réservé au créateur/Orga PP.", ephemeral=True)
+
+        class DelModal(discord.ui.Modal, title="Retirer de la blacklist"):
+            user = discord.ui.TextInput(label="ID ou @mention", required=True)
+
+            async def on_submit(self, inter:discord.Interaction):
+                m = re.findall(r"\d{15,20}", str(self.user))
+                if not m:
+                    return await inter.response.send_message("Utilisateur invalide.", ephemeral=True)
+                room.blacklist.discard(int(m[0]))
+                await inter.response.send_message("Retiré de la blacklist.", ephemeral=True)
+
+        await interaction.response.send_modal(DelModal())
+
+    @discord.ui.button(label="📜 Voir listes", style=discord.ButtonStyle.secondary, custom_id="vc:lists")
+    async def lists(self, interaction:discord.Interaction, _:discord.ui.Button):
+        vc, room = await self._resolve(interaction)
+        if not vc or not room: return
+        wl = ", ".join(f"<@{u}>" for u in room.whitelist) or "—"
+        bl = ", ".join(f"<@{u}>" for u in room.blacklist) or "—"
+        await interaction.response.send_message(f"**Whitelist**: {wl}\n**Blacklist**: {bl}", ephemeral=True)
 
 async def start_delete_timer(guild: discord.Guild, voice_id: int):
     await asyncio.sleep(TEMP_DELETE_GRACE_S)
@@ -898,19 +1090,18 @@ async def start_delete_timer(guild: discord.Guild, voice_id: int):
         temp_rooms.pop(voice_id, None)
         delete_tasks.pop(voice_id, None)
 
-# ===================== Bot =====================
+# ===================== Bot / setup_hook =====================
 class FiveBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=INTENTS)
 
     async def setup_hook(self):
-        # Vues persistantes
         for i in range(1, PREP_PAIRS+1):
             self.add_view(PanelView(i))
             self.add_view(MapVoteView(i))
         self.add_view(RankButtonView())
+        # Captcha start view est générée dynamiquement (custom_id signé), pas besoin add_view global ici.
 
-        # Sync tree
         if GUILD_ID:
             gid=int(GUILD_ID)
             self.tree.copy_global_to(guild=discord.Object(id=gid))
@@ -920,7 +1111,7 @@ class FiveBot(commands.Bot):
 
 bot = FiveBot()
 
-# ===================== CAPTCHA router (UNE SEULE VERSION) =====================
+# ===================== CAPTCHA Router (UNIQUE + SIMPLE) =====================
 @bot.listen("on_interaction")
 async def captcha_router(inter: discord.Interaction):
     try:
@@ -931,11 +1122,16 @@ async def captcha_router(inter: discord.Interaction):
             return
 
         parts = cid.split(":")
-        if len(parts) < 4:
+        # cap:start:guild:uid:tag  OR cap:answer:guild:uid:tag
+        if len(parts) != 5:
             return
 
-        _, action, uid_s, tag = parts
+        _, action, gid_s, uid_s, tag = parts
+        gid = int(gid_s)
         uid = int(uid_s)
+
+        if inter.guild is None or inter.guild.id != gid:
+            return
 
         if inter.user.id != uid:
             return await inter.response.send_message("Ce bouton ne t’est pas destiné.", ephemeral=True)
@@ -943,11 +1139,11 @@ async def captcha_router(inter: discord.Interaction):
         cleanup_captcha_store()
 
         if action == "start":
-            if htag(f"start:{uid}") != tag:
+            if htag(f"start:{gid}:{uid}") != tag:
                 return
 
             code = rand_text(CAPTCHA_CODE_LEN)
-            _captcha_store[uid] = {
+            _captcha_store[(gid, uid)] = {
                 "expected": code,
                 "tries": 0,
                 "started": now(),
@@ -961,38 +1157,43 @@ async def captcha_router(inter: discord.Interaction):
             emb = discord.Embed(
                 title="🔐 Vérification",
                 description="Recopie **exactement** le code de l’image (MAJUSCULES, sans espace).",
-                color=0x5865F2,
+                color=0x5865F2
             )
             emb.set_image(url="attachment://captcha.png")
 
-            v = discord.ui.View(timeout=None)
-            v.add_item(discord.ui.Button(
-                label="✍️ Répondre",
-                style=discord.ButtonStyle.success,
-                custom_id=f"cap:answer:{uid}:{htag(f'answer:{uid}')}",
-            ))
+            v = discord.ui.View()
+            v.add_item(
+                discord.ui.Button(
+                    label="✍️ Répondre",
+                    style=discord.ButtonStyle.success,
+                    custom_id=f"cap:answer:{gid}:{uid}:{htag(f'answer:{gid}:{uid}')}"
+                )
+            )
             return await inter.response.send_message(embed=emb, file=file, view=v, ephemeral=True)
 
         if action == "answer":
-            if htag(f"answer:{uid}") != tag:
+            if htag(f"answer:{gid}:{uid}") != tag:
                 return
-            return await inter.response.send_modal(CaptchaModal(uid))
+            return await inter.response.send_modal(CaptchaModal(gid, uid))
 
     except Exception:
-        # Evite de crasher le bot
+        # pas crash bot
         return
 
-# ===================== /verify =====================
 @bot.tree.command(description="Relancer la vérification (si tu n'as pas pu la faire).")
 async def verify(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    await send_captcha(interaction.guild, interaction.user)
-    await interaction.followup.send("Vérification envoyée (DM ou 🐺・bienvenue).", ephemeral=True)
+    await send_captcha_in_bienvenue(interaction.guild, interaction.user)
+    await interaction.followup.send("✅ Je t’ai remis la vérification dans **🐺・bienvenue**.", ephemeral=True)
 
 # ===================== Events =====================
 @bot.event
+async def on_ready():
+    print(f"[OK] Logged in as {bot.user} ({bot.user.id})")
+
+@bot.event
 async def on_member_join(member: discord.Member):
-    # rôle non vérifié
+    # rôles sécurité
     roles = await ensure_security_roles(member.guild)
     try:
         if roles["member"] in member.roles:
@@ -1002,16 +1203,16 @@ async def on_member_join(member: discord.Member):
     except discord.Forbidden:
         pass
 
-    # envoie captcha
-    await send_captcha(member.guild, member)
+    # envoi CAPTCHA dans BIENVENUE
+    await send_captcha_in_bienvenue(member.guild, member)
 
 @bot.event
 async def on_voice_state_update(member:discord.Member, before:discord.VoiceState, after:discord.VoiceState):
     guild = member.guild
 
-    # Création auto: entrée dans "➕ Créer un salon" (qui est dans PP)
+    # Création auto (entrée = channel "➕ Créer un salon")
     if after and after.channel and after.channel.name == CREATE_VOICE_NAME:
-        target_cat = commu_category(guild) or after.channel.category  # 👉 crée dans TAVERNE
+        target_cat = commu_category(guild) or after.channel.category  # 👉 TAVERNE prioritaire
         vc = await guild.create_voice_channel(f"🎤 Salon de {member.display_name}", category=target_cat)
         txt = await guild.create_text_channel(
             f"🔧-controle-{member.name}".lower(),
@@ -1029,13 +1230,23 @@ async def on_voice_state_update(member:discord.Member, before:discord.VoiceState
         temp_rooms[vc.id] = room
         await txt.send(f"{member.mention}, voici les contrôles de **ton** salon :", view=VoiceControlView(room))
 
-    # suppression différée si vide
+    # Timer suppression si vide
     if before and before.channel and before.channel.id in temp_rooms:
         vc = before.channel
         if len(vc.members) == 0:
             if vc.id in delete_tasks and not delete_tasks[vc.id].done():
                 delete_tasks[vc.id].cancel()
             delete_tasks[vc.id] = asyncio.create_task(start_delete_timer(guild, vc.id))
+
+    # WL/BL + privé
+    if after and after.channel and after.channel.id in temp_rooms:
+        room = temp_rooms[after.channel.id]
+        if member.id in room.blacklist and not member.guild_permissions.administrator:
+            try: await member.move_to(None)
+            except: pass
+        if room.private and member.id not in room.whitelist and member.id != room.owner_id and not member.guild_permissions.administrator:
+            try: await member.move_to(None)
+            except: pass
 
 # ===================== Slash Commands =====================
 @bot.tree.command(description="Configurer tout le serveur (sans doublons).")
@@ -1045,25 +1256,23 @@ async def setup(inter:discord.Interaction):
     g=inter.guild
 
     await ensure_roles(g)
-    await ensure_security_roles(g)
-
     cat_welcome = await create_category_with_channels(g, CAT_WELCOME_NAME, WELCOME_CHANNELS)
     cat_commu   = await create_category_with_channels(g, CAT_COMMU_NAME,   COMMU_CHANNELS)
     cat_fun     = await create_category_with_channels(g, CAT_FUN_NAME,     [("🎭・conte-auteurs","text"), ("🎨・fan-art","text")])
     cat_pp      = await create_category_with_channels(g, CAT_PP_NAME,      PP_TEXT)
 
-    # Sécurité (catégories + salons welcome)
+    # Sécurité (catégories)
     await apply_security_perms(g)
 
-    # "➕ Créer un salon" existe dans PP (bouton d’entrée)
-    if not discord.utils.get(cat_pp.voice_channels, name=CREATE_VOICE_NAME):
-        await g.create_voice_channel(CREATE_VOICE_NAME, category=cat_pp, reason="Setup bot")
+    # Créateur de salons (channel d'entrée dans PP)
+    if not discord.utils.find(lambda c: c.name==CREATE_VOICE_NAME, cat_pp.voice_channels):
+        await g.create_voice_channel(CREATE_VOICE_NAME, category=cat_pp)
 
-    # Vocs PP + textes salon-partie
+    # Vocs PP + textes • salon-partie-1..4
     await create_pp_voice_structure(g, cat_pp)
     await ensure_party_text_channels(g, cat_pp, count=PREP_PAIRS)
 
-    # Panels 5v5 + roulette maps
+    # Panels
     for i in range(1, PREP_PAIRS+1):
         chat = get_party_text_channel(g, i)
         if not chat:
@@ -1071,12 +1280,12 @@ async def setup(inter:discord.Interaction):
         await ensure_panel_once(chat, panel_embed(g, i), PanelView(i))
         await ensure_mapvote_panel_once(chat, i)
 
-    # Peak ELO dans auto-rôles (ça reste logique là-bas)
+    # Peak ELO dans auto-rôles
     await ensure_rank_prompt_in_autoroles(g, cat_welcome)
 
     # Branding
     try:
-        bienv = discord.utils.get(cat_welcome.text_channels, name="🐺・bienvenue") or find_text_by_slug(cat_welcome, "bienvenue")
+        bienv = find_text_by_slug(cat_welcome, "bienvenue")
         await g.edit(name=SERVER_BRAND_NAME, system_channel=bienv or g.system_channel)
     except: pass
     try:
@@ -1085,12 +1294,21 @@ async def setup(inter:discord.Interaction):
             await me.edit(nick=BOT_NICKNAME, reason="Brand nickname")
     except: pass
 
+    # Règles
+    try:
+        reg1 = find_text_by_slug(cat_welcome,"règlement")
+        if reg1: await post_server_rules(reg1)
+        reg2 = find_text_by_slug(cat_pp,"règlement-pp")
+        if reg2: await post_rules_pp(reg2)
+    except: pass
+
     await inter.followup.send(
         "✅ Setup terminé.\n"
-        "• Vérif CAPTCHA: DM sinon **🐺・bienvenue**\n"
-        "• Non vérifié: accès uniquement à **🐺・bienvenue** (+ règlement en lecture)\n"
-        "• Panels 5v5 + roulette maps: `• salon-partie-1..4`\n"
-        "• Créateur de salon: entrée dans PP, salon créé dans **🍻・TAVERNE**",
+        "• Vérif CAPTCHA dans **🐺・bienvenue**\n"
+        "• Non vérifiés bloqués partout ailleurs\n"
+        "• Panels 5v5 + roulette map dans `• salon-partie-1..4`\n"
+        "• Peak ELO dans `🪙・auto-rôles`\n"
+        "• Créateur de salon vocal OK (création dans 🍻・TAVERNE)",
         ephemeral=True
     )
 
@@ -1116,6 +1334,28 @@ async def party_code(inter:discord.Interaction, partie:app_commands.Choice[int],
     except: pass
     await inter.response.send_message(f"✅ Code posté dans {ch.mention}", ephemeral=True)
 
+@bot.tree.command(description="(Re)poser la roulette map dans chaque salon-partie existant.")
+@app_commands.checks.has_permissions(manage_guild=True)
+async def map_seed(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    g = interaction.guild
+    ok, miss = [], []
+    for i in range(1, PREP_PAIRS + 1):
+        chat = get_party_text_channel(g, i)
+        if not chat:
+            miss.append(i)
+            continue
+        try:
+            await ensure_mapvote_panel_once(chat, i)
+            ok.append(i)
+        except Exception:
+            miss.append(i)
+
+    text = []
+    if ok:   text.append("✅ Roulette posée pour: " + ", ".join(map(str, ok)))
+    if miss: text.append("⚠️ Introuvable: " + ", ".join(map(str, miss)) + " (crée les salons-partie manquants)")
+    await interaction.followup.send("\n".join(text) or "Rien à faire.", ephemeral=True)
+
 @bot.tree.command(description="Définir ton peak ELO (VALORANT).")
 @app_commands.describe(valeur="Ex: 'silver 1', 'asc 1', 'immortal 2', 'radiant'")
 async def set_rank(inter:discord.Interaction, valeur:str):
@@ -1125,6 +1365,19 @@ async def set_rank(inter:discord.Interaction, valeur:str):
     await apply_rank_role(inter.guild, inter.user, disp)
     await inter.response.send_message(f"✅ Peak enregistré : **{disp}**", ephemeral=True)
 
+@bot.tree.command(description="Voir le peak ELO d'un membre.")
+@app_commands.describe(membre="Laisser vide pour toi-même.")
+async def rank_show(inter:discord.Interaction, membre:Optional[discord.Member]=None):
+    m=membre or inter.user
+    best=None; bestv=-1
+    for r in m.roles:
+        if is_rank_role_name(r.name):
+            v=rank_value(r.name)
+            if v>bestv: best,bestv=r.name,v
+    if best is None:
+        return await inter.response.send_message(f"{m.mention} n'a pas encore de peak ELO.", ephemeral=True)
+    await inter.response.send_message(f"Peak ELO de {m.mention} : **{best}**", ephemeral=True)
+
 @bot.tree.command(description="Tirer une map au hasard (simple).")
 async def roulette(inter:discord.Interaction):
     choice=random.choice(VALORANT_MAPS)
@@ -1133,12 +1386,14 @@ async def roulette(inter:discord.Interaction):
 # ===================== Run =====================
 def main():
     if not TOKEN:
-        raise RuntimeError("DISCORD_BOT_TOKEN alert: manquant (.env)")
+        raise RuntimeError("DISCORD_BOT_TOKEN manquant (.env)")
+
     try:
         from keep_alive import keep_alive
         keep_alive()
     except Exception as e:
         print(f"[keep_alive] disabled: {e}")
+
     bot.run(TOKEN)
 
 if __name__ == "__main__":
