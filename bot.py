@@ -217,6 +217,10 @@ ALPHABET              = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 _captcha_store: Dict[tuple, dict] = {}
 _SECRET = hashlib.sha256(str(random.random()).encode()).digest()
 
+# store message public (bienvenue) à supprimer après réussite
+# (guild_id, user_id) -> {"channel_id": int, "message_id": int}
+_verify_msg_store: Dict[tuple, dict] = {}
+
 def now() -> float:
     return time.time()
 
@@ -234,6 +238,24 @@ def cleanup_captcha_store():
             continue
         if st.get("ttl", 0) <= t:
             _captcha_store.pop(key, None)
+
+async def _delete_public_verify_msg(guild: discord.Guild, gid: int, uid: int):
+    """Supprime le message de vérif dans #bienvenue (si on l'a en mémoire)."""
+    try:
+        vkey = (gid, uid)
+        pub = _verify_msg_store.pop(vkey, None)
+        if not pub:
+            return
+        ch = guild.get_channel(pub.get("channel_id"))
+        if not isinstance(ch, discord.TextChannel):
+            return
+        try:
+            msg = await ch.fetch_message(pub.get("message_id"))
+            await msg.delete()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 def _font_simple():
     for f, size in [("DejaVuSans-Bold.ttf", 56), ("DejaVuSans.ttf", 56), ("arial.ttf", 56)]:
@@ -322,6 +344,9 @@ class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
         if got == st["expected"]:
             _captcha_store.pop(key, None)
 
+            # ✅ SUPPRIMER le msg public de vérif dans bienvenue
+            await _delete_public_verify_msg(inter.guild, self.guild_id, self.uid)
+
             roles = await ensure_security_roles(inter.guild)
             try:
                 if roles["unverified"] in inter.user.roles:
@@ -338,7 +363,12 @@ class CaptchaModal(discord.ui.Modal, title="Vérification CAPTCHA"):
 
         if st["tries"] >= CAPTCHA_ATTEMPTS:
             _captcha_store.pop(key, None)
-            return await inter.response.send_message("❌ Trop d'essais. Clique sur **🔒 Commencer** pour un nouveau code.", ephemeral=True)
+
+            # ❌ aussi on supprime le message public pour éviter le spam,
+            # l’utilisateur pourra relancer /verify
+            await _delete_public_verify_msg(inter.guild, self.guild_id, self.uid)
+
+            return await inter.response.send_message("❌ Trop d'essais. Clique sur **/verify** pour un nouveau code.", ephemeral=True)
 
         left = CAPTCHA_ATTEMPTS - st["tries"]
         await inter.response.send_message(f"❌ Mauvais code. Essais restants : **{left}**.", ephemeral=True)
@@ -358,7 +388,8 @@ class CaptchaStartView(discord.ui.View):
 
 async def send_captcha_in_bienvenue(guild: discord.Guild, member: discord.Member):
     """
-    Envoie UNIQUEMENT dans #🐺・bienvenue (pas DM, pas auto-rôles).
+    Envoie UNIQUEMENT dans #🐺・bienvenue (pas DM).
+    Stocke l'ID du message pour le supprimer à validation.
     """
     cleanup_captcha_store()
     cat = discord.utils.get(guild.categories, name=CAT_WELCOME_NAME)
@@ -367,7 +398,6 @@ async def send_captcha_in_bienvenue(guild: discord.Guild, member: discord.Member
 
     ch = find_text_by_slug(cat, "bienvenue")
     if not ch:
-        # fallback: si pas trouvé, on prend le 1er salon texte de la cat
         ch = cat.text_channels[0] if cat.text_channels else None
     if not ch:
         return None
@@ -375,11 +405,20 @@ async def send_captcha_in_bienvenue(guild: discord.Guild, member: discord.Member
     if not ch.permissions_for(guild.me).send_messages:
         return None
 
+    # si un ancien msg existe pour ce user, on tente de le supprimer (anti doublon)
+    try:
+        await _delete_public_verify_msg(guild, guild.id, member.id)
+    except Exception:
+        pass
+
     view = CaptchaStartView(guild.id, member.id)
-    return await ch.send(
+    msg = await ch.send(
         f"{member.mention} 🐺 **Bienvenue !** Clique sur le bouton pour te vérifier :",
         view=view
     )
+
+    _verify_msg_store[(guild.id, member.id)] = {"channel_id": ch.id, "message_id": msg.id}
+    return msg
 
 # ===================== Ranks (Valorant) =====================
 TIERS = [
@@ -387,6 +426,7 @@ TIERS = [
     ("gold","Gold",3), ("platinum","Platinum",3), ("diamond","Diamond",3),
     ("ascendant","Ascendant",3), ("immortal","Immortal",3), ("radiant","Radiant",1),
 ]
+TIER_INDEX = {k:i for k,i_ in enumerate([t[0] for t in TIERS]) for k in [TIERS[k][0]]}  # (compact) safe
 TIER_INDEX = {k:i for i,(k,_,_) in enumerate(TIERS)}
 TIER_META  = {k:(label,divs) for k,label,divs in TIERS}
 TIER_ALIASES = {
@@ -1100,7 +1140,6 @@ class FiveBot(commands.Bot):
             self.add_view(PanelView(i))
             self.add_view(MapVoteView(i))
         self.add_view(RankButtonView())
-        # Captcha start view est générée dynamiquement (custom_id signé), pas besoin add_view global ici.
 
         if GUILD_ID:
             gid=int(GUILD_ID)
@@ -1177,7 +1216,6 @@ async def captcha_router(inter: discord.Interaction):
             return await inter.response.send_modal(CaptchaModal(gid, uid))
 
     except Exception:
-        # pas crash bot
         return
 
 @bot.tree.command(description="Relancer la vérification (si tu n'as pas pu la faire).")
@@ -1193,7 +1231,6 @@ async def on_ready():
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    # rôles sécurité
     roles = await ensure_security_roles(member.guild)
     try:
         if roles["member"] in member.roles:
@@ -1203,7 +1240,7 @@ async def on_member_join(member: discord.Member):
     except discord.Forbidden:
         pass
 
-    # envoi CAPTCHA dans BIENVENUE
+    # ✅ PAS DE DM : on envoie uniquement dans #bienvenue
     await send_captcha_in_bienvenue(member.guild, member)
 
 @bot.event
@@ -1212,7 +1249,7 @@ async def on_voice_state_update(member:discord.Member, before:discord.VoiceState
 
     # Création auto (entrée = channel "➕ Créer un salon")
     if after and after.channel and after.channel.name == CREATE_VOICE_NAME:
-        target_cat = commu_category(guild) or after.channel.category  # 👉 TAVERNE prioritaire
+        target_cat = commu_category(guild) or after.channel.category
         vc = await guild.create_voice_channel(f"🎤 Salon de {member.display_name}", category=target_cat)
         txt = await guild.create_text_channel(
             f"🔧-controle-{member.name}".lower(),
@@ -1261,18 +1298,14 @@ async def setup(inter:discord.Interaction):
     cat_fun     = await create_category_with_channels(g, CAT_FUN_NAME,     [("🎭・conte-auteurs","text"), ("🎨・fan-art","text")])
     cat_pp      = await create_category_with_channels(g, CAT_PP_NAME,      PP_TEXT)
 
-    # Sécurité (catégories)
     await apply_security_perms(g)
 
-    # Créateur de salons (channel d'entrée dans PP)
     if not discord.utils.find(lambda c: c.name==CREATE_VOICE_NAME, cat_pp.voice_channels):
         await g.create_voice_channel(CREATE_VOICE_NAME, category=cat_pp)
 
-    # Vocs PP + textes • salon-partie-1..4
     await create_pp_voice_structure(g, cat_pp)
     await ensure_party_text_channels(g, cat_pp, count=PREP_PAIRS)
 
-    # Panels
     for i in range(1, PREP_PAIRS+1):
         chat = get_party_text_channel(g, i)
         if not chat:
@@ -1280,10 +1313,8 @@ async def setup(inter:discord.Interaction):
         await ensure_panel_once(chat, panel_embed(g, i), PanelView(i))
         await ensure_mapvote_panel_once(chat, i)
 
-    # Peak ELO dans auto-rôles
     await ensure_rank_prompt_in_autoroles(g, cat_welcome)
 
-    # Branding
     try:
         bienv = find_text_by_slug(cat_welcome, "bienvenue")
         await g.edit(name=SERVER_BRAND_NAME, system_channel=bienv or g.system_channel)
@@ -1294,7 +1325,6 @@ async def setup(inter:discord.Interaction):
             await me.edit(nick=BOT_NICKNAME, reason="Brand nickname")
     except: pass
 
-    # Règles
     try:
         reg1 = find_text_by_slug(cat_welcome,"règlement")
         if reg1: await post_server_rules(reg1)
@@ -1304,7 +1334,8 @@ async def setup(inter:discord.Interaction):
 
     await inter.followup.send(
         "✅ Setup terminé.\n"
-        "• Vérif CAPTCHA dans **🐺・bienvenue**\n"
+        "• Vérif CAPTCHA dans **🐺・bienvenue** (pas de DM)\n"
+        "• Message public de vérif supprimé après validation\n"
         "• Non vérifiés bloqués partout ailleurs\n"
         "• Panels 5v5 + roulette map dans `• salon-partie-1..4`\n"
         "• Peak ELO dans `🪙・auto-rôles`\n"
