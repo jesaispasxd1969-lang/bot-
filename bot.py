@@ -52,6 +52,9 @@ VALORANT_MAPS = [
     "Corrode",
 ]
 
+VOTE_THRESHOLD_ACCEPT = 5
+VOTE_THRESHOLD_REJECT = 5
+
 INTENTS = discord.Intents.default()
 INTENTS.guilds = True
 INTENTS.members = True
@@ -144,10 +147,26 @@ class Database:
                 map_name TEXT NOT NULL,
                 attack_ids TEXT NOT NULL,
                 defense_ids TEXT NOT NULL,
+                map_yes INTEGER NOT NULL DEFAULT 0,
+                map_no INTEGER NOT NULL DEFAULT 0,
+                map_locked INTEGER NOT NULL DEFAULT 0,
+                map_voters TEXT NOT NULL DEFAULT '{}',
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
         )
+
+        existing_columns = {row[1] for row in cur.execute("PRAGMA table_info(active_matches)").fetchall()}
+        migrations = {
+            "map_yes": "ALTER TABLE active_matches ADD COLUMN map_yes INTEGER NOT NULL DEFAULT 0",
+            "map_no": "ALTER TABLE active_matches ADD COLUMN map_no INTEGER NOT NULL DEFAULT 0",
+            "map_locked": "ALTER TABLE active_matches ADD COLUMN map_locked INTEGER NOT NULL DEFAULT 0",
+            "map_voters": "ALTER TABLE active_matches ADD COLUMN map_voters TEXT NOT NULL DEFAULT '{}'",
+        }
+        for column, statement in migrations.items():
+            if column not in existing_columns:
+                cur.execute(statement)
+
         self.conn.commit()
 
     def upsert_player_rank(self, user_id: int, rank_name: str) -> None:
@@ -177,13 +196,17 @@ class Database:
         map_name: str,
         attack_ids: List[int],
         defense_ids: List[int],
+        map_yes: int,
+        map_no: int,
+        map_locked: bool,
+        map_voters: Dict[str, str],
     ) -> None:
         self.conn.execute(
             """
             INSERT OR REPLACE INTO active_matches (
                 prep_channel_id, started_by_id, ui_message_id, party_code,
-                map_name, attack_ids, defense_ids
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                map_name, attack_ids, defense_ids, map_yes, map_no, map_locked, map_voters
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 prep_channel_id,
@@ -193,6 +216,10 @@ class Database:
                 map_name,
                 json.dumps(attack_ids),
                 json.dumps(defense_ids),
+                map_yes,
+                map_no,
+                int(map_locked),
+                json.dumps(map_voters),
             ),
         )
         self.conn.commit()
@@ -223,9 +250,14 @@ class MatchState:
     map_name: str
     attack_ids: List[int]
     defense_ids: List[int]
+    map_yes: int
+    map_no: int
+    map_locked: bool
+    map_voters: Dict[str, str]
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "MatchState":
+        raw_voters = row["map_voters"] if "map_voters" in row.keys() else "{}"
         return cls(
             prep_channel_id=row["prep_channel_id"],
             started_by_id=row["started_by_id"],
@@ -234,6 +266,10 @@ class MatchState:
             map_name=row["map_name"],
             attack_ids=json.loads(row["attack_ids"]),
             defense_ids=json.loads(row["defense_ids"]),
+            map_yes=row["map_yes"] if "map_yes" in row.keys() else 0,
+            map_no=row["map_no"] if "map_no" in row.keys() else 0,
+            map_locked=bool(row["map_locked"]) if "map_locked" in row.keys() else False,
+            map_voters=json.loads(raw_voters or "{}"),
         )
 
 
@@ -526,6 +562,22 @@ def format_mentions(members: List[discord.Member]) -> str:
     return "\n".join(member.mention for member in members) if members else "—"
 
 
+def persist_match_state(state: MatchState) -> None:
+    db.save_active_match(
+        prep_channel_id=state.prep_channel_id,
+        started_by_id=state.started_by_id,
+        ui_message_id=state.ui_message_id,
+        party_code=state.party_code,
+        map_name=state.map_name,
+        attack_ids=state.attack_ids,
+        defense_ids=state.defense_ids,
+        map_yes=state.map_yes,
+        map_no=state.map_no,
+        map_locked=state.map_locked,
+        map_voters=state.map_voters,
+    )
+
+
 def build_match_embed(guild: discord.Guild, state: MatchState) -> discord.Embed:
     prep_channel = guild.get_channel(state.prep_channel_id)
     prep_name = prep_channel.name if isinstance(prep_channel, discord.VoiceChannel) else "Préparation"
@@ -533,19 +585,36 @@ def build_match_embed(guild: discord.Guild, state: MatchState) -> discord.Embed:
     selected_members = current_members[:10]
     waiting_members = current_members[10:]
 
+    status_line = "✅ Map acceptée" if state.map_locked else "🗳️ Vote map ouvert"
+    if state.attack_ids and state.defense_ids:
+        status_line = "🚀 PP lancée"
+
     embed = discord.Embed(
-        title=f"Partie perso — {prep_name}",
-        description=f"**Party code :** `{state.party_code}`\n**Map :** **{state.map_name}**",
-        color=discord.Color.blurple(),
+        title=f"🗺️ Roulette map — {prep_name}",
+        description=(
+            f"**Party code :** `{state.party_code}`\n"
+            f"**Map proposée :** **{state.map_name}**\n\n"
+            f"**Votes** — ✅ Oui: **{state.map_yes}/{VOTE_THRESHOLD_ACCEPT}** • ❌ Non: **{state.map_no}/{VOTE_THRESHOLD_REJECT}**\n"
+            f"*(1 vote par personne)*\n\n"
+            f"{status_line}"
+        ),
+        color=discord.Color.green() if state.map_locked else discord.Color.blurple(),
     )
+
     embed.add_field(
-        name="👥 Joueurs dans la voc",
+        name="👥 Joueurs détectés dans la voc",
         value=(
-            f"**{len(current_members)}/10**\n"
-            f"Les **10 premiers arrivés** sont pris pour les équipes s'il y a plus de 10 joueurs."
+            f"**{len(current_members)}** joueur(s) présent(s).\n"
+            f"La PP prend les **10 premiers arrivés** s'il y a plus de 10 joueurs.\n"
+            f"Le bouton **🚀 Lancer la PP** devient utile à partir de **10 joueurs**."
         ),
         inline=False,
     )
+
+    if selected_members:
+        embed.add_field(name="🎮 Top 10 pris en compte", value=format_mentions(selected_members), inline=False)
+    if waiting_members:
+        embed.add_field(name="⏳ Hors top 10", value=format_mentions(waiting_members), inline=False)
 
     if state.attack_ids and state.defense_ids:
         attack_members = [guild.get_member(user_id) for user_id in state.attack_ids]
@@ -554,22 +623,11 @@ def build_match_embed(guild: discord.Guild, state: MatchState) -> discord.Embed:
         defense_members = [m for m in defense_members if m is not None]
         embed.add_field(name="⚔️ Attaque", value=format_mentions(attack_members), inline=True)
         embed.add_field(name="🛡️ Défense", value=format_mentions(defense_members), inline=True)
-    else:
-        embed.add_field(
-            name="⚖️ Équipes",
-            value="Pas encore générées. Le vote map et le party code sont déjà actifs.\nLe bouton **Générer équipes** marche à partir de **10 joueurs**.",
-            inline=False,
-        )
-
-    if selected_members:
-        embed.add_field(name="🎮 Joueurs pris en compte", value=format_mentions(selected_members), inline=False)
-    if waiting_members:
-        embed.add_field(name="⏳ En attente / hors top 10", value=format_mentions(waiting_members), inline=False)
 
     image_url = map_image_url(state.map_name)
     if image_url:
         embed.set_image(url=image_url)
-    embed.set_footer(text="Boutons : reroll map • générer équipes • victoire attaque • victoire défense • annuler")
+    embed.set_footer(text="Vote map • Lancer la PP • Annuler")
     return embed
 
 
@@ -662,19 +720,15 @@ class PPStartModal(discord.ui.Modal, title="Lancer une partie perso"):
             map_name=pick_map(),
             attack_ids=[],
             defense_ids=[],
+            map_yes=0,
+            map_no=0,
+            map_locked=False,
+            map_voters={},
         )
 
         ui_message = await prep_channel.send(embed=build_match_embed(interaction.guild, state), view=PPMatchView())
         state.ui_message_id = ui_message.id
-        db.save_active_match(
-            prep_channel_id=state.prep_channel_id,
-            started_by_id=state.started_by_id,
-            ui_message_id=state.ui_message_id,
-            party_code=state.party_code,
-            map_name=state.map_name,
-            attack_ids=state.attack_ids,
-            defense_ids=state.defense_ids,
-        )
+        persist_match_state(state)
 
         count = len(ordered_prep_members(prep_channel))
         await interaction.response.send_message(
@@ -708,7 +762,59 @@ class PPMatchView(discord.ui.View):
 
         return channel, state
 
-    @discord.ui.button(label="🎲 Reroll map", style=discord.ButtonStyle.secondary, custom_id="pp:match:reroll", row=0)
+    @discord.ui.button(label="✅ Oui", style=discord.ButtonStyle.success, custom_id="pp:match:yes", row=0)
+    async def vote_yes(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+        prep_channel, state = await self._resolve(interaction)
+        if prep_channel is None or state is None:
+            return
+        if state.map_locked:
+            return await interaction.response.send_message("La map est déjà acceptée.", ephemeral=True)
+
+        voter_key = str(interaction.user.id)
+        if voter_key in state.map_voters:
+            return await interaction.response.send_message("Tu as déjà voté pour cette map.", ephemeral=True)
+
+        state.map_voters[voter_key] = "yes"
+        state.map_yes += 1
+        if state.map_yes >= VOTE_THRESHOLD_ACCEPT:
+            state.map_locked = True
+        persist_match_state(state)
+        await interaction.response.edit_message(embed=build_match_embed(interaction.guild, state), view=self)
+
+    @discord.ui.button(label="❌ Non", style=discord.ButtonStyle.danger, custom_id="pp:match:no", row=0)
+    async def vote_no(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+        prep_channel, state = await self._resolve(interaction)
+        if prep_channel is None or state is None:
+            return
+        if state.map_locked:
+            return await interaction.response.send_message("La map est déjà acceptée.", ephemeral=True)
+
+        voter_key = str(interaction.user.id)
+        if voter_key in state.map_voters:
+            return await interaction.response.send_message("Tu as déjà voté pour cette map.", ephemeral=True)
+
+        state.map_voters[voter_key] = "no"
+        state.map_no += 1
+        note = None
+        if state.map_no >= VOTE_THRESHOLD_REJECT:
+            old_map = state.map_name
+            state.map_name = pick_map(exclude=old_map)
+            state.map_yes = 0
+            state.map_no = 0
+            state.map_locked = False
+            state.map_voters = {}
+            note = "❌ 5 votes non atteints : nouvelle map proposée."
+
+        persist_match_state(state)
+        await interaction.response.edit_message(embed=build_match_embed(interaction.guild, state), view=self)
+        if note:
+            await interaction.followup.send(note, ephemeral=True)
+
+    @discord.ui.button(label="🎲 Relancer (Orga)", style=discord.ButtonStyle.secondary, custom_id="pp:match:reroll", row=0)
     async def reroll(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
@@ -719,19 +825,15 @@ class PPMatchView(discord.ui.View):
             return await interaction.response.send_message("Réservé au créateur de la partie, Orga PP ou admin.", ephemeral=True)
 
         state.map_name = pick_map(exclude=state.map_name)
-        db.save_active_match(
-            prep_channel_id=state.prep_channel_id,
-            started_by_id=state.started_by_id,
-            ui_message_id=state.ui_message_id,
-            party_code=state.party_code,
-            map_name=state.map_name,
-            attack_ids=state.attack_ids,
-            defense_ids=state.defense_ids,
-        )
+        state.map_yes = 0
+        state.map_no = 0
+        state.map_locked = False
+        state.map_voters = {}
+        persist_match_state(state)
         await interaction.response.edit_message(embed=build_match_embed(interaction.guild, state), view=self)
 
-    @discord.ui.button(label="⚖️ Générer équipes", style=discord.ButtonStyle.primary, custom_id="pp:match:generate", row=0)
-    async def generate(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+    @discord.ui.button(label="🚀 Lancer la PP", style=discord.ButtonStyle.primary, custom_id="pp:match:launch", row=1)
+    async def launch(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
         if not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
         prep_channel, state = await self._resolve(interaction)
@@ -739,12 +841,14 @@ class PPMatchView(discord.ui.View):
             return
         if not is_match_controller(interaction.user, state):
             return await interaction.response.send_message("Réservé au créateur de la partie, Orga PP ou admin.", ephemeral=True)
+        if state.attack_ids or state.defense_ids:
+            return await interaction.response.send_message("La PP est déjà lancée pour ce vocal.", ephemeral=True)
 
         current_members = ordered_prep_members(prep_channel)
         if len(current_members) < 10:
             await interaction.response.edit_message(embed=build_match_embed(interaction.guild, state), view=self)
             return await interaction.followup.send(
-                f"Il faut **10 joueurs** pour générer les équipes. Actuellement : **{len(current_members)}/10**.",
+                f"Il faut **10 joueurs** pour lancer la PP. Actuellement : **{len(current_members)}/10**.",
                 ephemeral=True,
             )
 
@@ -756,29 +860,14 @@ class PPMatchView(discord.ui.View):
 
         state.attack_ids = [member.id for member in attack]
         state.defense_ids = [member.id for member in defense]
-        db.save_active_match(
-            prep_channel_id=state.prep_channel_id,
-            started_by_id=state.started_by_id,
-            ui_message_id=state.ui_message_id,
-            party_code=state.party_code,
-            map_name=state.map_name,
-            attack_ids=state.attack_ids,
-            defense_ids=state.defense_ids,
-        )
+        persist_match_state(state)
         await interaction.response.edit_message(embed=build_match_embed(interaction.guild, state), view=self)
+
         if waiting_members:
             await interaction.followup.send(
-                f"✅ Équipes générées avec les **10 premiers**. Joueurs non pris en compte : {', '.join(member.display_name for member in waiting_members)}",
+                "✅ PP lancée avec les **10 premiers arrivés**. Hors top 10 : " + ", ".join(member.display_name for member in waiting_members),
                 ephemeral=True,
             )
-
-    @discord.ui.button(label="⚔️ Victoire attaque", style=discord.ButtonStyle.success, custom_id="pp:match:attack_win", row=1)
-    async def attack_win(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self._finish_match(interaction, winners_are_attack=True)
-
-    @discord.ui.button(label="🛡️ Victoire défense", style=discord.ButtonStyle.success, custom_id="pp:match:defense_win", row=1)
-    async def defense_win(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        await self._finish_match(interaction, winners_are_attack=False)
 
     @discord.ui.button(label="❌ Annuler", style=discord.ButtonStyle.danger, custom_id="pp:match:cancel", row=1)
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -796,32 +885,6 @@ class PPMatchView(discord.ui.View):
         await interaction.response.edit_message(content="❌ Partie annulée.", embed=None, view=None)
         try:
             await prep_channel.send("❌ La partie active a été annulée.")
-        except (discord.Forbidden, discord.HTTPException):
-            pass
-
-    async def _finish_match(self, interaction: discord.Interaction, *, winners_are_attack: bool) -> None:
-        if not isinstance(interaction.user, discord.Member):
-            return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
-        prep_channel, state = await self._resolve(interaction)
-        if prep_channel is None or state is None:
-            return
-        if not is_match_controller(interaction.user, state):
-            return await interaction.response.send_message("Réservé au créateur de la partie, Orga PP ou admin.", ephemeral=True)
-        if not state.attack_ids or not state.defense_ids:
-            return await interaction.response.send_message("Les équipes ne sont pas encore générées.", ephemeral=True)
-
-        db.delete_active_match(prep_channel.id)
-        members = [m for m in interaction.guild.members if m.id in state.attack_ids + state.defense_ids]
-        await clear_team_roles(interaction.guild, members)
-
-        winning_side = "Attaque" if winners_are_attack else "Défense"
-        await interaction.response.edit_message(
-            content=f"🏁 Match terminé — **{winning_side}** gagne.",
-            embed=None,
-            view=None,
-        )
-        try:
-            await prep_channel.send(f"🏁 Partie terminée. **{winning_side}** gagne.")
         except (discord.Forbidden, discord.HTTPException):
             pass
 
