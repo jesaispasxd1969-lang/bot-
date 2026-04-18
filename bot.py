@@ -6,9 +6,12 @@ import threading
 import unicodedata
 import urllib.error
 import urllib.request
+import math
+import statistics
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Tuple
+from itertools import combinations
 
 import discord
 from discord import app_commands
@@ -44,6 +47,9 @@ HOME_CATEGORY_NAME = os.getenv("HOME_CATEGORY_NAME", "KAER MORHEN")
 TAVERN_CATEGORY_NAME = os.getenv("TAVERN_CATEGORY_NAME", "TAVERNE")
 PARTY_CATEGORY_NAME = os.getenv("PARTY_CATEGORY_NAME", "PARTIE PERSO")
 ORGA_TEXT_CHANNEL_NAME = os.getenv("ORGA_TEXT_CHANNEL_NAME", "orga-pp")
+WELCOME_CHANNEL_NAME = os.getenv("WELCOME_CHANNEL_NAME", "bienvenue")
+CUSTOM_VOICE_CATEGORY_NAME = os.getenv("CUSTOM_VOICE_CATEGORY_NAME", TAVERN_CATEGORY_NAME)
+CUSTOM_VOICE_DEFAULT_LIMIT = int(os.getenv("CUSTOM_VOICE_DEFAULT_LIMIT", "0"))
 READ_ONLY_TEXT_CHANNEL_NAMES = [
     name.strip()
     for name in os.getenv("READ_ONLY_TEXT_CHANNEL_NAMES", "règlement,annonces").split(",")
@@ -84,14 +90,14 @@ INTENTS.message_content = False
 
 # 25 options max sur un menu déroulant Discord.
 RANK_OPTIONS: List[Tuple[str, int]] = [
-    ("Fer 1", 100), ("Fer 2", 105), ("Fer 3", 110),
+    ("Fer 1", 100), ("Fer 2", 110), ("Fer 3", 120),
     ("Bronze 1", 200), ("Bronze 2", 210), ("Bronze 3", 220),
     ("Argent 1", 300), ("Argent 2", 310), ("Argent 3", 320),
     ("Or 1", 400), ("Or 2", 410), ("Or 3", 420),
     ("Platine 1", 500), ("Platine 2", 510), ("Platine 3", 520),
     ("Diamant 1", 600), ("Diamant 2", 610), ("Diamant 3", 620),
     ("Ascendant 1", 700), ("Ascendant 2", 710), ("Ascendant 3", 720),
-    ("Immortal 1", 800), ("Immortal 2", 810), ("Immortal 3", 840),
+    ("Immortal 1", 800), ("Immortal 2", 810), ("Immortal 3", 820),
     ("Radiant", 900),
 ]
 RANK_VALUE_BY_NAME = {name: value for name, value in RANK_OPTIONS}
@@ -217,6 +223,15 @@ class Database:
             if column not in existing_columns:
                 cur.execute(statement)
 
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS custom_voice_rooms (
+                channel_id INTEGER PRIMARY KEY,
+                owner_id INTEGER NOT NULL
+            )
+            """
+        )
+
         self.conn.commit()
 
     def upsert_player_rank(self, user_id: int, rank_name: str) -> None:
@@ -236,6 +251,24 @@ class Database:
             (user_id,),
         ).fetchone()
         return row[0] if row else None
+
+    def register_custom_voice(self, channel_id: int, owner_id: int) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO custom_voice_rooms (channel_id, owner_id) VALUES (?, ?)",
+            (channel_id, owner_id),
+        )
+        self.conn.commit()
+
+    def get_custom_voice_owner(self, channel_id: int) -> Optional[int]:
+        row = self.conn.execute(
+            "SELECT owner_id FROM custom_voice_rooms WHERE channel_id = ?",
+            (channel_id,),
+        ).fetchone()
+        return int(row[0]) if row else None
+
+    def delete_custom_voice(self, channel_id: int) -> None:
+        self.conn.execute("DELETE FROM custom_voice_rooms WHERE channel_id = ?", (channel_id,))
+        self.conn.commit()
 
     def save_active_match(
         self,
@@ -373,6 +406,35 @@ def find_text_channel(guild: discord.Guild, aliases: List[str], *, category: Opt
 def get_verify_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
     aliases = [VERIFY_CHANNEL_NAME, *VERIFY_CHANNEL_ALIASES]
     return find_text_channel(guild, aliases)
+
+
+def get_welcome_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    home_category = find_category(guild, HOME_CATEGORY_NAME)
+    aliases = [WELCOME_CHANNEL_NAME, "bienvenue", "welcome"]
+    return find_text_channel(guild, aliases, category=home_category) or find_text_channel(guild, aliases)
+
+
+def is_admin(member: discord.Member) -> bool:
+    return member.guild_permissions.administrator
+
+
+def has_orga_access(member: discord.Member) -> bool:
+    return is_admin(member) or any(r.name == ORGA_ROLE for r in member.roles)
+
+
+def is_verified_member(member: discord.Member) -> bool:
+    return any(r.name == PLAYER_ROLE for r in member.roles) or has_orga_access(member)
+
+
+def is_custom_voice(channel: Optional[discord.abc.GuildChannel]) -> bool:
+    return isinstance(channel, discord.VoiceChannel) and db.get_custom_voice_owner(channel.id) is not None
+
+
+def can_manage_custom_voice(member: discord.Member, channel: Optional[discord.VoiceChannel]) -> bool:
+    if not isinstance(channel, discord.VoiceChannel):
+        return False
+    owner_id = db.get_custom_voice_owner(channel.id)
+    return owner_id is not None and (member.id == owner_id or has_orga_access(member))
 
 
 async def ensure_role(guild: discord.Guild, role_name: str, *, color: Optional[discord.Color] = None) -> discord.Role:
@@ -598,6 +660,78 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
         )
 
 
+async def set_custom_voice_permissions(channel: discord.VoiceChannel, *, owner: discord.Member, locked: bool = False) -> None:
+    roles = await ensure_core_roles(channel.guild)
+    player = roles["player"]
+    orga = roles["orga"]
+    await _safe_set_permissions(channel, channel.guild.default_role, view_channel=False, connect=False, send_messages=False)
+    await _safe_set_permissions(channel, roles["non_verified"], view_channel=False, connect=False, send_messages=False)
+    await _safe_set_permissions(
+        channel,
+        player,
+        view_channel=True,
+        connect=not locked,
+        speak=True,
+        stream=True,
+        use_voice_activation=True,
+        send_messages=True,
+        read_message_history=True,
+        use_application_commands=True,
+    )
+    await _safe_set_permissions(
+        channel,
+        orga,
+        view_channel=True,
+        connect=True,
+        speak=True,
+        stream=True,
+        use_voice_activation=True,
+        send_messages=True,
+        read_message_history=True,
+        use_application_commands=True,
+        move_members=True,
+        manage_channels=True,
+        mute_members=True,
+        deafen_members=True,
+    )
+    await _safe_set_permissions(
+        channel,
+        owner,
+        view_channel=True,
+        connect=True,
+        speak=True,
+        stream=True,
+        use_voice_activation=True,
+        send_messages=True,
+        read_message_history=True,
+        use_application_commands=True,
+        move_members=True,
+        manage_channels=True,
+        priority_speaker=True,
+    )
+
+
+async def create_custom_voice_channel(guild: discord.Guild, owner: discord.Member, name: str, user_limit: int = 0) -> discord.VoiceChannel:
+    category = find_category(guild, CUSTOM_VOICE_CATEGORY_NAME) or find_category(guild, TAVERN_CATEGORY_NAME)
+    channel = await guild.create_voice_channel(name=name, category=category, user_limit=max(0, min(99, user_limit)))
+    db.register_custom_voice(channel.id, owner.id)
+    await set_custom_voice_permissions(channel, owner=owner, locked=False)
+    try:
+        await owner.move_to(channel)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    return channel
+
+
+async def cleanup_custom_voice_if_empty(channel: discord.VoiceChannel) -> None:
+    if is_custom_voice(channel) and len(channel.members) == 0:
+        db.delete_custom_voice(channel.id)
+        try:
+            await channel.delete(reason="Temporary custom voice empty")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+
 async def apply_rank(member: discord.Member, rank_name: str) -> None:
     roles = await ensure_core_roles(member.guild)
     rank_role = discord.utils.get(member.guild.roles, name=rank_name)
@@ -685,29 +819,73 @@ def ordered_prep_members(channel: discord.VoiceChannel) -> List[discord.Member]:
     return sorted(members, key=lambda m: (order_map.get(m.id, 10**12), m.display_name.lower()))
 
 
+def _effective_player_skill(member: discord.Member) -> float:
+    raw = float(max(1, rank_value_for_member(member)))
+    # Transformation non linéaire : on garde l'ordre des ranks mais on accentue légèrement
+    # l'impact des très hauts ranks sans exploser les écarts.
+    return (raw ** 1.12) + (22.0 * math.log1p(raw)) + (8.0 * math.sqrt(raw))
+
+
+def _team_balance_cost(team_a: List[discord.Member], team_b: List[discord.Member]) -> float:
+    skills_a = sorted((_effective_player_skill(m) for m in team_a), reverse=True)
+    skills_b = sorted((_effective_player_skill(m) for m in team_b), reverse=True)
+
+    sum_a, sum_b = sum(skills_a), sum(skills_b)
+    mean_a, mean_b = statistics.fmean(skills_a), statistics.fmean(skills_b)
+    stdev_a = statistics.pstdev(skills_a) if len(skills_a) > 1 else 0.0
+    stdev_b = statistics.pstdev(skills_b) if len(skills_b) > 1 else 0.0
+
+    top2_a, top2_b = sum(skills_a[:2]), sum(skills_b[:2])
+    bot2_a, bot2_b = sum(skills_a[-2:]), sum(skills_b[-2:])
+    median_a, median_b = statistics.median(skills_a), statistics.median(skills_b)
+
+    # Fonction de coût multicritère.
+    # 1) écart total de puissance
+    # 2) écart de moyenne
+    # 3) écart de dispersion pour éviter une équipe très polarisée
+    # 4) écart sur les 2 plus gros ranks pour éviter un empilement de gros niveaux
+    # 5) écart sur les 2 plus faibles pour éviter qu'une équipe ait tout le "bas du lobby"
+    # 6) écart de médiane comme stabilisateur
+    return (
+        abs(sum_a - sum_b)
+        + 0.65 * abs(mean_a - mean_b)
+        + 0.40 * abs(stdev_a - stdev_b)
+        + 0.55 * abs(top2_a - top2_b)
+        + 0.35 * abs(bot2_a - bot2_b)
+        + 0.25 * abs(median_a - median_b)
+    )
+
+
 def split_balanced_teams(members: List[discord.Member]) -> Tuple[List[discord.Member], List[discord.Member]]:
-    scored = sorted(members, key=rank_value_for_member, reverse=True)
-    attack: List[discord.Member] = []
-    defense: List[discord.Member] = []
-    score_attack = 0
-    score_defense = 0
+    # On optimise exhaustivement toutes les répartitions 5v5 parmi les 10 joueurs retenus.
+    # 10 choose 5 = 252 combinaisons : c'est très léger mais bien plus précis qu'un glouton simple.
+    if len(members) != 10:
+        scored = sorted(members, key=rank_value_for_member, reverse=True)
+        midpoint = len(scored) // 2
+        return scored[:midpoint], scored[midpoint:]
 
-    for member in scored:
-        value = rank_value_for_member(member)
-        if len(attack) >= 5:
-            defense.append(member)
-            score_defense += value
-        elif len(defense) >= 5:
-            attack.append(member)
-            score_attack += value
-        elif score_attack <= score_defense:
-            attack.append(member)
-            score_attack += value
-        else:
-            defense.append(member)
-            score_defense += value
+    indexed = list(enumerate(members))
+    best_attack: List[discord.Member] = []
+    best_defense: List[discord.Member] = []
+    best_cost = float('inf')
+    best_raw_gap = float('inf')
 
-    return attack, defense
+    for combo in combinations(indexed, 5):
+        attack_indices = {idx for idx, _ in combo}
+        attack = [member for idx, member in indexed if idx in attack_indices]
+        defense = [member for idx, member in indexed if idx not in attack_indices]
+
+        cost = _team_balance_cost(attack, defense)
+        raw_gap = abs(sum(rank_value_for_member(m) for m in attack) - sum(rank_value_for_member(m) for m in defense))
+
+        # Tiebreakers : coût global, puis écart brut de ranks, puis ordre lexicographique stable.
+        if cost < best_cost - 1e-9 or (abs(cost - best_cost) <= 1e-9 and raw_gap < best_raw_gap):
+            best_cost = cost
+            best_raw_gap = raw_gap
+            best_attack = attack
+            best_defense = defense
+
+    return best_attack, best_defense
 
 
 def get_associated_team_channels(prep_channel: discord.VoiceChannel) -> Tuple[Optional[discord.VoiceChannel], Optional[discord.VoiceChannel]]:
@@ -1155,17 +1333,35 @@ async def on_member_join(member: discord.Member) -> None:
     except discord.Forbidden:
         pass
 
+    welcome_channel = get_welcome_channel(member.guild)
+    if welcome_channel is not None:
+        embed = discord.Embed(
+            title="🐺 Bienvenue à Kaer Morhen",
+            description=(
+                f"{member.mention}, le Loup Blanc t'ouvre les portes du fort.\n"
+                f"Passe d'abord par **{VERIFY_CHANNEL_NAME}** pour choisir ton rang et rejoindre la chasse."
+            ),
+            color=discord.Color.gold(),
+        )
+        embed.set_footer(text="Les sorceleurs se préparent. Choisis ton rang et entre dans l'arène.")
+        try:
+            await welcome_channel.send(embed=embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
     if member.bot:
         return
 
-    if isinstance(before.channel, discord.VoiceChannel) and is_prep_voice(before.channel):
-        if not after.channel or after.channel.id != before.channel.id:
+    if isinstance(before.channel, discord.VoiceChannel):
+        if is_prep_voice(before.channel) and (not after.channel or after.channel.id != before.channel.id):
             forget_member_from_prep(before.channel, member)
             if load_match_state(before.channel.id) is not None:
                 await refresh_match_message(member.guild, before.channel.id)
+        if not after.channel or after.channel.id != before.channel.id:
+            await cleanup_custom_voice_if_empty(before.channel)
 
     if isinstance(after.channel, discord.VoiceChannel) and is_prep_voice(after.channel):
         if not before.channel or before.channel.id != after.channel.id:
@@ -1180,6 +1376,8 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setup_pp(interaction: discord.Interaction) -> None:
     guild = interaction.guild
+    if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
+        return await interaction.response.send_message("Commande réservée aux admins du serveur.", ephemeral=True)
     await interaction.response.defer(ephemeral=True, thinking=True)
 
     await ensure_core_roles(guild)
@@ -1224,6 +1422,8 @@ async def setup_pp(interaction: discord.Interaction) -> None:
 async def pp(interaction: discord.Interaction) -> None:
     if not isinstance(interaction.user, discord.Member):
         return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+    if not has_orga_access(interaction.user):
+        return await interaction.response.send_message("Commande réservée aux **Orga PP** et admins.", ephemeral=True)
     prep_channel = interaction.user.voice.channel if interaction.user.voice else None
     if not is_prep_voice(prep_channel):
         return await interaction.response.send_message(
@@ -1243,6 +1443,8 @@ async def pp(interaction: discord.Interaction) -> None:
 async def pp_cleanup(interaction: discord.Interaction) -> None:
     if not isinstance(interaction.user, discord.Member):
         return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+    if not has_orga_access(interaction.user):
+        return await interaction.response.send_message("Commande réservée aux **Orga PP** et admins.", ephemeral=True)
 
     prep_channel = interaction.user.voice.channel if interaction.user.voice else None
     if not is_prep_voice(prep_channel):
@@ -1258,6 +1460,83 @@ async def pp_cleanup(interaction: discord.Interaction) -> None:
     await clear_team_roles(interaction.guild, members)
     db.delete_active_match(prep_channel.id)
     await interaction.response.send_message("✅ Partie active nettoyée.", ephemeral=True)
+
+
+@bot.tree.command(name="voc_create", description="Crée un vocal privé gérable dans la Taverne.")
+@app_commands.guild_only()
+@app_commands.describe(nom="Nom du salon vocal", slots="Nombre max de places (0 = illimité)")
+async def voc_create(interaction: discord.Interaction, nom: str, slots: Optional[int] = CUSTOM_VOICE_DEFAULT_LIMIT) -> None:
+    if not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+    if not is_verified_member(interaction.user):
+        return await interaction.response.send_message("Tu dois être vérifié pour créer un vocal.", ephemeral=True)
+    if len(nom.strip()) < 2:
+        return await interaction.response.send_message("Donne un nom un peu plus long pour le vocal.", ephemeral=True)
+    channel = await create_custom_voice_channel(interaction.guild, interaction.user, nom.strip(), slots or 0)
+    await interaction.response.send_message(
+        f"✅ Vocal créé : {channel.mention}\nTu peux le **renommer**, **modifier la limite**, **expulser** des gens et le **verrouiller** avec les commandes dédiées.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="voc_lock", description="Verrouille ou déverrouille ton vocal privé.")
+@app_commands.guild_only()
+@app_commands.describe(verrouille="true pour verrouiller, false pour ouvrir")
+async def voc_lock(interaction: discord.Interaction, verrouille: bool) -> None:
+    if not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+    channel = interaction.user.voice.channel if interaction.user.voice else None
+    if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
+        return await interaction.response.send_message("Connecte-toi dans le vocal privé que tu gères.", ephemeral=True)
+    owner = channel.guild.get_member(db.get_custom_voice_owner(channel.id)) or interaction.user
+    await set_custom_voice_permissions(channel, owner=owner, locked=verrouille)
+    await interaction.response.send_message("🔒 Vocal verrouillé." if verrouille else "🔓 Vocal ouvert.", ephemeral=True)
+
+
+@bot.tree.command(name="voc_limit", description="Change la limite de places de ton vocal privé.")
+@app_commands.guild_only()
+@app_commands.describe(slots="0 = illimité, sinon entre 1 et 99")
+async def voc_limit(interaction: discord.Interaction, slots: app_commands.Range[int, 0, 99]) -> None:
+    if not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+    channel = interaction.user.voice.channel if interaction.user.voice else None
+    if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
+        return await interaction.response.send_message("Connecte-toi dans le vocal privé que tu gères.", ephemeral=True)
+    await channel.edit(user_limit=int(slots), reason="Custom voice limit change")
+    await interaction.response.send_message(f"👥 Limite mise à **{slots}**.", ephemeral=True)
+
+
+@bot.tree.command(name="voc_rename", description="Renomme ton vocal privé.")
+@app_commands.guild_only()
+@app_commands.describe(nom="Nouveau nom du vocal")
+async def voc_rename(interaction: discord.Interaction, nom: str) -> None:
+    if not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+    channel = interaction.user.voice.channel if interaction.user.voice else None
+    if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
+        return await interaction.response.send_message("Connecte-toi dans le vocal privé que tu gères.", ephemeral=True)
+    await channel.edit(name=nom.strip(), reason="Custom voice rename")
+    await interaction.response.send_message(f"✏️ Vocal renommé en **{nom.strip()}**.", ephemeral=True)
+
+
+@bot.tree.command(name="voc_kick", description="Déconnecte quelqu'un de ton vocal privé.")
+@app_commands.guild_only()
+@app_commands.describe(membre="Membre à déconnecter")
+async def voc_kick(interaction: discord.Interaction, membre: discord.Member) -> None:
+    if not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+    channel = interaction.user.voice.channel if interaction.user.voice else None
+    if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
+        return await interaction.response.send_message("Connecte-toi dans le vocal privé que tu gères.", ephemeral=True)
+    if membre.bot or not membre.voice or membre.voice.channel.id != channel.id:
+        return await interaction.response.send_message("Ce membre n'est pas dans ton vocal.", ephemeral=True)
+    if membre.id == interaction.user.id:
+        return await interaction.response.send_message("Tu ne peux pas te déconnecter toi-même avec cette commande.", ephemeral=True)
+    try:
+        await membre.move_to(None, reason=f"Disconnected from private voice by {interaction.user}")
+    except (discord.Forbidden, discord.HTTPException):
+        return await interaction.response.send_message("Impossible de déconnecter ce membre.", ephemeral=True)
+    await interaction.response.send_message(f"⛔ {membre.mention} a été déconnecté de **{channel.name}**.", ephemeral=True)
 
 
 # ===================== RENDER WEB HEALTH SERVER =====================
