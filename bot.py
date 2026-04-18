@@ -107,18 +107,14 @@ RANK_TIER_EMOJI = {
 }
 
 FALLBACK_MAP_IMAGE = {
-    "Haven": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blt1f6b8f00f50f1d2d/5eb26f538c3b8b4d13a56656/Haven_2.jpg",
-    "Corrode": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blt2b5d5f8bde7975ed/66882f7d0ea0db6b7c80a8d3/Corrode_Splash.jpg",
-    "Icebox": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blteae6cfc448f942f4/5ed5667f6f8c0d0fe64f2d2d/Icebox_2.jpg",
-    "Pearl": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blt6d0ea3f8be4f7fdb/62a0a6dc83b0814f921e7f65/PearlLoadingScreen.jpg",
-    "Sunset": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blt5f1ea0fdf75ebf2d/64d46d72e3a2f21845f6e4da/Sunset_Loading_Screen.jpg",
-    "Lotus": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/bltc9716a9d8a8a14ce/63ca98c9f8f6c46a2a23e3da/Lotus_2.jpg",
-    "Abyss": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blt58d627eb8f9da5be/665605c2629f6f0cb0d8f98f/Abyss_Splash.jpg",
-    "Breeze": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blt7a8e8ed30d1dc022/608b02f93f6c7c14ac24d434/Breeze_2.jpg",
-    "Ascent": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blta26f5bf0b5f86579/5eb7fa55fdaf4a4b4840c83d/Ascent_2.jpg",
-    "Split": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blt643d6e03da4c4c57/5eb7fa25d8c0d4168f4b8f53/Split_2.jpg",
-    "Fracture": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/bltd5f9ce7bf65d7c44/61787db31b09f3266d6f294e/Fracture_2.jpg",
-    "Bind": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/bltfd633927429c40f4/5eb26f6b8c3b8b4d13a56657/Bind_2.jpg",
+   "Haven": "https://c-valorant-api.op.gg/Assets/Maps/2BEE0DC9-4FFE-519B-1CBD-7FBE763A6047_splash.png?image=q_auto:good,f_webp&v=1760610922",
+ "Corrode": "https://c-valorant-api.op.gg/Assets/Maps/1C18AB1F-420D-0D8B-71D0-77AD3C439115_splash.png?image=q_auto:good,f_webp&v=1760610922", 
+"Icebox": "https://c-valorant-api.op.gg/Assets/Maps/E2AD5C54-4114-A870-9641-8EA21279579A_splash.png?image=q_auto:good,f_webp&v=1760610922", "Pearl": "https://c-valorant-api.op.gg/Assets/Maps/FD267378-4D1D-484F-FF52-77821ED10DC2_splash.png?image=q_auto:good,f_webp&v=1760610922", "Sunset": "https://c-valorant-api.op.gg/Assets/Maps/92584FBE-486A-B1B2-9FAA-39B0F486B498_splash.png?image=q_auto:good,f_webp&v=1760610922", 
+"Lotus": "https://c-valorant-api.op.gg/Assets/Maps/2FE4ED3A-450A-948B-6D6B-E89A78E680A9_splash.png?image=q_auto:good,f_webp&v=1760610922",
+ "Abyss": "https://c-valorant-api.op.gg/Assets/Maps/224B0A95-48B9-F703-1BD8-67ACA101A61F_splash.png?image=q_auto:good,f_webp&v=1760610922", "Breeze": "https://c-valorant-api.op.gg/Assets/Maps/2FB9A4FD-47B8-4E7D-A969-74B4046EBD53_splash.png?image=q_auto:good,f_webp&v=1760610922", 
+"Ascent": "https://c-valorant-api.op.gg/Assets/Maps/7EAECC1B-4337-BBF6-6AB9-04B8F06B3319_splash.png?image=q_auto:good,f_webp&v=1760610922"
+, "Split": "https://c-valorant-api.op.gg/Assets/Maps/D960549E-485C-E861-8D71-AA9D1AED12A2_splash.png?image=q_auto:good,f_webp&v=1760610922", "Fracture": "https://c-valorant-api.op.gg/Assets/Maps/B529448B-4D60-346E-E89E-00A4C527A405_splash.png?image=q_auto:good,f_webp&v=1760610922", 
+"Bind": "https://c-valorant-api.op.gg/Assets/Maps/2C9D57EC-4431-9C5E-2939-8F9EF6DD5CBA_splash.png?image=q_auto:good,f_webp&v=1760610922",
 }
 
 VALORANT_MAPS_API_URL = os.getenv("VALORANT_MAPS_API_URL", "https://valorant-api.com/v1/maps")
