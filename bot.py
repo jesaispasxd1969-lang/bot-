@@ -84,16 +84,45 @@ INTENTS.message_content = False
 
 # 25 options max sur un menu déroulant Discord.
 RANK_OPTIONS: List[Tuple[str, int]] = [
-    ("Fer 1", 100), ("Fer 2", 110), ("Fer 3", 120),
+    ("Fer 1", 100), ("Fer 2", 105), ("Fer 3", 110),
     ("Bronze 1", 200), ("Bronze 2", 210), ("Bronze 3", 220),
     ("Argent 1", 300), ("Argent 2", 310), ("Argent 3", 320),
     ("Or 1", 400), ("Or 2", 410), ("Or 3", 420),
     ("Platine 1", 500), ("Platine 2", 510), ("Platine 3", 520),
     ("Diamant 1", 600), ("Diamant 2", 610), ("Diamant 3", 620),
     ("Ascendant 1", 700), ("Ascendant 2", 710), ("Ascendant 3", 720),
-    ("Immortal 1", 800), ("Immortal 2", 810), ("Immortal 3", 820),
+    ("Immortal 1", 800), ("Immortal 2", 810), ("Immortal 3", 840),
+    ("Radiant", 900),
 ]
 RANK_VALUE_BY_NAME = {name: value for name, value in RANK_OPTIONS}
+
+RANK_EMOJI_BY_NAME = {
+    "Fer 1": "Iron_1_Rank",
+    "Fer 2": "Iron_2_Rank",
+    "Fer 3": "Iron_3_Rank",
+    "Bronze 1": "Bronze_1_Rank",
+    "Bronze 2": "Bronze_2_Rank",
+    "Bronze 3": "Bronze_3_Rank",
+    "Argent 1": "Silver_1_Rank",
+    "Argent 2": "Silver_2_Rank",
+    "Argent 3": "Silver_3_Rank",
+    "Or 1": "Gold_1_Rank",
+    "Or 2": "Gold_2_Rank",
+    "Or 3": "Gold_3_Rank",
+    "Platine 1": "Platinum_1_Rank",
+    "Platine 2": "Platinum_2_Rank",
+    "Platine 3": "Platinum_3_Rank",
+    "Diamant 1": "Diamond_1_Rank",
+    "Diamant 2": "Diamond_2_Rank",
+    "Diamant 3": "Diamond_3_Rank",
+    "Ascendant 1": "Ascendant_1_Rank",
+    "Ascendant 2": "Ascendant_2_Rank",
+    "Ascendant 3": "Ascendant_3_Rank",
+    "Immortal 1": "Immortal_1_Rank",
+    "Immortal 2": "Immortal_2_Rank",
+    "Immortal 3": "Immortal_3_Rank",
+    "Radiant": "Radiant_Rank",
+}
 
 RANK_TIER_EMOJI = {
     "Fer": "⚫",
@@ -104,59 +133,23 @@ RANK_TIER_EMOJI = {
     "Diamant": "💎",
     "Ascendant": "🟢",
     "Immortal": "👑",
+    "Radiant": "🌟",
 }
 
-FALLBACK_MAP_IMAGE = {
-   "Haven": "https://c-valorant-api.op.gg/Assets/Maps/2BEE0DC9-4FFE-519B-1CBD-7FBE763A6047_splash.png?image=q_auto:good,f_webp&v=1760610922",
- "Corrode": "https://c-valorant-api.op.gg/Assets/Maps/1C18AB1F-420D-0D8B-71D0-77AD3C439115_splash.png?image=q_auto:good,f_webp&v=1760610922", 
-"Icebox": "https://c-valorant-api.op.gg/Assets/Maps/E2AD5C54-4114-A870-9641-8EA21279579A_splash.png?image=q_auto:good,f_webp&v=1760610922", "Pearl": "https://c-valorant-api.op.gg/Assets/Maps/FD267378-4D1D-484F-FF52-77821ED10DC2_splash.png?image=q_auto:good,f_webp&v=1760610922", "Sunset": "https://c-valorant-api.op.gg/Assets/Maps/92584FBE-486A-B1B2-9FAA-39B0F486B498_splash.png?image=q_auto:good,f_webp&v=1760610922", 
-"Lotus": "https://c-valorant-api.op.gg/Assets/Maps/2FE4ED3A-450A-948B-6D6B-E89A78E680A9_splash.png?image=q_auto:good,f_webp&v=1760610922",
- "Abyss": "https://c-valorant-api.op.gg/Assets/Maps/224B0A95-48B9-F703-1BD8-67ACA101A61F_splash.png?image=q_auto:good,f_webp&v=1760610922", "Breeze": "https://c-valorant-api.op.gg/Assets/Maps/2FB9A4FD-47B8-4E7D-A969-74B4046EBD53_splash.png?image=q_auto:good,f_webp&v=1760610922", 
-"Ascent": "https://c-valorant-api.op.gg/Assets/Maps/7EAECC1B-4337-BBF6-6AB9-04B8F06B3319_splash.png?image=q_auto:good,f_webp&v=1760610922"
-, "Split": "https://c-valorant-api.op.gg/Assets/Maps/D960549E-485C-E861-8D71-AA9D1AED12A2_splash.png?image=q_auto:good,f_webp&v=1760610922", "Fracture": "https://c-valorant-api.op.gg/Assets/Maps/B529448B-4D60-346E-E89E-00A4C527A405_splash.png?image=q_auto:good,f_webp&v=1760610922", 
-"Bind": "https://c-valorant-api.op.gg/Assets/Maps/2C9D57EC-4431-9C5E-2939-8F9EF6DD5CBA_splash.png?image=q_auto:good,f_webp&v=1760610922",
+MAP_IMAGE: Dict[str, str] = {
+    "Haven":    "https://c-valorant-api.op.gg/Assets/Maps/2BEE0DC9-4FFE-519B-1CBD-7FBE763A6047_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Corrode":  "https://c-valorant-api.op.gg/Assets/Maps/1C18AB1F-420D-0D8B-71D0-77AD3C439115_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Icebox":   "https://c-valorant-api.op.gg/Assets/Maps/E2AD5C54-4114-A870-9641-8EA21279579A_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Pearl":    "https://c-valorant-api.op.gg/Assets/Maps/FD267378-4D1D-484F-FF52-77821ED10DC2_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Sunset":   "https://c-valorant-api.op.gg/Assets/Maps/92584FBE-486A-B1B2-9FAA-39B0F486B498_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Lotus":    "https://c-valorant-api.op.gg/Assets/Maps/2FE4ED3A-450A-948B-6D6B-E89A78E680A9_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Abyss":    "https://c-valorant-api.op.gg/Assets/Maps/224B0A95-48B9-F703-1BD8-67ACA101A61F_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Breeze":   "https://c-valorant-api.op.gg/Assets/Maps/2FB9A4FD-47B8-4E7D-A969-74B4046EBD53_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Ascent":   "https://c-valorant-api.op.gg/Assets/Maps/7EAECC1B-4337-BBF6-6AB9-04B8F06B3319_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Split":    "https://c-valorant-api.op.gg/Assets/Maps/D960549E-485C-E861-8D71-AA9D1AED12A2_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Fracture": "https://c-valorant-api.op.gg/Assets/Maps/B529448B-4D60-346E-E89E-00A4C527A405_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Bind":     "https://c-valorant-api.op.gg/Assets/Maps/2C9D57EC-4431-9C5E-2939-8F9EF6DD5CBA_splash.png?image=q_auto:good,f_webp&v=1760610922",
 }
-
-VALORANT_MAPS_API_URL = os.getenv("VALORANT_MAPS_API_URL", "https://valorant-api.com/v1/maps")
-MAP_IMAGE_CACHE: Dict[str, str] = dict(FALLBACK_MAP_IMAGE)
-MAP_IMAGE_CACHE_LOADED = False
-
-
-def refresh_map_image_cache() -> None:
-    global MAP_IMAGE_CACHE_LOADED
-    request = urllib.request.Request(
-        VALORANT_MAPS_API_URL,
-        headers={"User-Agent": "Mozilla/5.0 DiscordBot/1.0"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception:
-        return
-
-    data = payload.get("data", [])
-    if not isinstance(data, list):
-        return
-
-    updated = dict(FALLBACK_MAP_IMAGE)
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        display_name = item.get("displayName")
-        if not display_name:
-            continue
-        image_url = (
-            item.get("splash")
-            or item.get("stylizedBackground")
-            or item.get("displayIcon")
-            or item.get("listViewIcon")
-        )
-        if image_url:
-            updated[display_name] = image_url
-
-    MAP_IMAGE_CACHE.clear()
-    MAP_IMAGE_CACHE.update(updated)
-    MAP_IMAGE_CACHE_LOADED = True
 
 # Ordre d'arrivée dans chaque vocal Préparation.
 JOIN_SEQUENCE = 0
@@ -336,14 +329,25 @@ def tier_emoji(rank_name: str) -> str:
     return RANK_TIER_EMOJI.get(tier, "🎯")
 
 
+def rank_select_emoji(guild: Optional[discord.Guild], rank_name: str):
+    if guild is not None:
+        emoji_name = RANK_EMOJI_BY_NAME.get(rank_name)
+        if emoji_name:
+            custom_emoji = discord.utils.get(guild.emojis, name=emoji_name)
+            if custom_emoji is not None:
+                return custom_emoji
+    return tier_emoji(rank_name)
+
+
 def rank_value_for_member(member: discord.Member) -> int:
     stored = db.get_player_rank(member.id)
+    best = 0
     if stored and stored in RANK_VALUE_BY_NAME:
-        return RANK_VALUE_BY_NAME[stored]
+        best = RANK_VALUE_BY_NAME[stored]
     for role in member.roles:
         if role.name in RANK_VALUE_BY_NAME:
-            return RANK_VALUE_BY_NAME[role.name]
-    return 0
+            best = max(best, RANK_VALUE_BY_NAME[role.name])
+    return best
 
 
 def is_prep_voice(channel: Optional[discord.abc.GuildChannel]) -> bool:
@@ -760,13 +764,7 @@ def pick_map(exclude: Optional[str] = None) -> str:
 
 
 def map_image_url(map_name: str) -> Optional[str]:
-    global MAP_IMAGE_CACHE_LOADED
-    image_url = MAP_IMAGE_CACHE.get(map_name)
-    if image_url:
-        return image_url
-    if not MAP_IMAGE_CACHE_LOADED:
-        refresh_map_image_cache()
-    return MAP_IMAGE_CACHE.get(map_name)
+    return MAP_IMAGE.get(map_name)
 
 
 def load_match_state(prep_channel_id: int) -> Optional[MatchState]:
@@ -802,7 +800,7 @@ def persist_match_state(state: MatchState) -> None:
     )
 
 
-def build_match_embed(guild: discord.Guild, state: MatchState) -> discord.Embed:
+def build_match_embeds(guild: discord.Guild, state: MatchState) -> List[discord.Embed]:
     prep_channel = guild.get_channel(state.prep_channel_id)
     prep_name = prep_channel.name if isinstance(prep_channel, discord.VoiceChannel) else "Préparation"
     current_members = ordered_prep_members(prep_channel) if isinstance(prep_channel, discord.VoiceChannel) else []
@@ -813,19 +811,31 @@ def build_match_embed(guild: discord.Guild, state: MatchState) -> discord.Embed:
     if state.attack_ids and state.defense_ids:
         status_line = "🚀 PP lancée"
 
-    embed = discord.Embed(
+    header = discord.Embed(
         title=f"🗺️ Roulette map — {prep_name}",
         description=(
             f"**Party code :** `{state.party_code}`\n"
-            f"**Map proposée :** **{state.map_name}**\n\n"
-            f"**Votes** — ✅ Oui: **{state.map_yes}/{VOTE_THRESHOLD_ACCEPT}** • ❌ Non: **{state.map_no}/{VOTE_THRESHOLD_REJECT}**\n"
-            f"*(1 vote par personne)*\n\n"
-            f"{status_line}"
+            f"**Map proposée :** **{state.map_name}**"
         ),
         color=discord.Color.green() if state.map_locked else discord.Color.blurple(),
     )
 
-    embed.add_field(
+    image_url = map_image_url(state.map_name)
+    if image_url:
+        header.set_image(url=image_url)
+    else:
+        header.add_field(name="🖼️ Image de map", value="Image indisponible pour cette map.", inline=False)
+
+    details = discord.Embed(
+        description=(
+            f"**Votes** — ✅ Oui: **{state.map_yes}/{VOTE_THRESHOLD_ACCEPT}** • ❌ Non: **{state.map_no}/{VOTE_THRESHOLD_REJECT}**\n"
+            f"*(1 vote par personne)*\n\n"
+            f"{status_line}"
+        ),
+        color=header.color,
+    )
+
+    details.add_field(
         name="👥 Joueurs détectés dans la voc",
         value=(
             f"**{len(current_members)}** joueur(s) présent(s).\n"
@@ -836,25 +846,20 @@ def build_match_embed(guild: discord.Guild, state: MatchState) -> discord.Embed:
     )
 
     if selected_members:
-        embed.add_field(name="🎮 Top 10 pris en compte", value=format_mentions(selected_members), inline=False)
+        details.add_field(name="🎮 Top 10 pris en compte", value=format_mentions(selected_members), inline=False)
     if waiting_members:
-        embed.add_field(name="⏳ Hors top 10", value=format_mentions(waiting_members), inline=False)
+        details.add_field(name="⏳ Hors top 10", value=format_mentions(waiting_members), inline=False)
 
     if state.attack_ids and state.defense_ids:
         attack_members = [guild.get_member(user_id) for user_id in state.attack_ids]
         defense_members = [guild.get_member(user_id) for user_id in state.defense_ids]
         attack_members = [m for m in attack_members if m is not None]
         defense_members = [m for m in defense_members if m is not None]
-        embed.add_field(name="⚔️ Attaque", value=format_mentions(attack_members), inline=True)
-        embed.add_field(name="🛡️ Défense", value=format_mentions(defense_members), inline=True)
+        details.add_field(name="⚔️ Attaque", value=format_mentions(attack_members), inline=True)
+        details.add_field(name="🛡️ Défense", value=format_mentions(defense_members), inline=True)
 
-    image_url = map_image_url(state.map_name)
-    if image_url:
-        embed.set_image(url=image_url)
-    else:
-        embed.add_field(name="🖼️ Image de map", value="Image indisponible pour cette map.", inline=False)
-    embed.set_footer(text="Vote map • Lancer la PP • Annuler")
-    return embed
+    details.set_footer(text="Vote map • Lancer la PP • Annuler")
+    return [header, details]
 
 
 async def refresh_match_message(guild: discord.Guild, prep_channel_id: int) -> None:
@@ -869,19 +874,19 @@ async def refresh_match_message(guild: discord.Guild, prep_channel_id: int) -> N
     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
         return
     try:
-        await message.edit(embed=build_match_embed(guild, state), view=PPMatchView())
+        await message.edit(embeds=build_match_embeds(guild, state), view=PPMatchView())
     except (discord.Forbidden, discord.HTTPException):
         pass
 
 
 # ===================== UI: VERIFICATION =====================
 class RankSelect(discord.ui.Select):
-    def __init__(self):
+    def __init__(self, guild: Optional[discord.Guild] = None):
         options = [
             discord.SelectOption(
                 label=name,
                 value=name,
-                emoji=tier_emoji(name),
+                emoji=rank_select_emoji(guild, name),
                 description=f"Attribue le rôle {name}",
             )
             for name, _ in RANK_OPTIONS
@@ -907,9 +912,9 @@ class RankSelect(discord.ui.Select):
 
 
 class VerificationView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, guild: Optional[discord.Guild] = None):
         super().__init__(timeout=None)
-        self.add_item(RankSelect())
+        self.add_item(RankSelect(guild))
 
 
 # ===================== UI: /pp MATCH =====================
@@ -952,7 +957,7 @@ class PPStartModal(discord.ui.Modal, title="Lancer une partie perso"):
             map_voters={},
         )
 
-        ui_message = await prep_channel.send(embed=build_match_embed(interaction.guild, state), view=PPMatchView())
+        ui_message = await prep_channel.send(embeds=build_match_embeds(interaction.guild, state), view=PPMatchView())
         state.ui_message_id = ui_message.id
         persist_match_state(state)
 
@@ -1007,7 +1012,7 @@ class PPMatchView(discord.ui.View):
         if state.map_yes >= VOTE_THRESHOLD_ACCEPT:
             state.map_locked = True
         persist_match_state(state)
-        await interaction.response.edit_message(embed=build_match_embed(interaction.guild, state), view=self)
+        await interaction.response.edit_message(embeds=build_match_embeds(interaction.guild, state), view=self)
 
     @discord.ui.button(label="❌ Non", style=discord.ButtonStyle.danger, custom_id="pp:match:no", row=0)
     async def vote_no(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -1036,7 +1041,7 @@ class PPMatchView(discord.ui.View):
             note = "❌ 5 votes non atteints : nouvelle map proposée."
 
         persist_match_state(state)
-        await interaction.response.edit_message(embed=build_match_embed(interaction.guild, state), view=self)
+        await interaction.response.edit_message(embeds=build_match_embeds(interaction.guild, state), view=self)
         if note:
             await interaction.followup.send(note, ephemeral=True)
 
@@ -1056,7 +1061,7 @@ class PPMatchView(discord.ui.View):
         state.map_locked = False
         state.map_voters = {}
         persist_match_state(state)
-        await interaction.response.edit_message(embed=build_match_embed(interaction.guild, state), view=self)
+        await interaction.response.edit_message(embeds=build_match_embeds(interaction.guild, state), view=self)
 
     @discord.ui.button(label="🚀 Lancer la PP", style=discord.ButtonStyle.primary, custom_id="pp:match:launch", row=1)
     async def launch(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -1072,7 +1077,7 @@ class PPMatchView(discord.ui.View):
 
         current_members = ordered_prep_members(prep_channel)
         if len(current_members) < 10:
-            await interaction.response.edit_message(embed=build_match_embed(interaction.guild, state), view=self)
+            await interaction.response.edit_message(embeds=build_match_embeds(interaction.guild, state), view=self)
             return await interaction.followup.send(
                 f"Il faut **10 joueurs** pour lancer la PP. Actuellement : **{len(current_members)}/10**.",
                 ephemeral=True,
@@ -1087,7 +1092,7 @@ class PPMatchView(discord.ui.View):
         state.attack_ids = [member.id for member in attack]
         state.defense_ids = [member.id for member in defense]
         persist_match_state(state)
-        await interaction.response.edit_message(embed=build_match_embed(interaction.guild, state), view=self)
+        await interaction.response.edit_message(embeds=build_match_embeds(interaction.guild, state), view=self)
 
         if waiting_members:
             await interaction.followup.send(
@@ -1204,7 +1209,7 @@ async def setup_pp(interaction: discord.Interaction) -> None:
                 description="Choisis ton **rank Valorant** pour débloquer l'accès au serveur.\nLe salon est en **lecture seule** : tout se fait via le menu.",
                 color=discord.Color.blurple(),
             )
-            await verify_channel.send(embed=embed, view=VerificationView())
+            await verify_channel.send(embed=embed, view=VerificationView(guild))
 
     text = "✅ Setup terminé.\n"
     if missing:
