@@ -19,7 +19,6 @@ GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 DB_PATH = os.getenv("PP_DB_PATH", "pp_bot.sqlite3")
 
 VERIFY_CHANNEL_NAME = os.getenv("VERIFY_CHANNEL_NAME", "verification")
-LEADERBOARD_CHANNEL_NAME = os.getenv("LEADERBOARD_CHANNEL_NAME", "classement")
 PREP_CHANNEL_NAMES = [
     name.strip()
     for name in os.getenv(
@@ -35,10 +34,6 @@ ORGA_ROLE = os.getenv("ORGA_ROLE", "Orga PP")
 TEAM_ATTACK_ROLE = os.getenv("TEAM_ATTACK_ROLE", "Équipe Attaque")
 TEAM_DEFENSE_ROLE = os.getenv("TEAM_DEFENSE_ROLE", "Équipe Défense")
 PLAYER_ROLE = os.getenv("PLAYER_ROLE", "Joueur")
-
-POINTS_WIN = int(os.getenv("POINTS_WIN", "10"))
-POINTS_LOSS = int(os.getenv("POINTS_LOSS", "3"))
-POINTS_PARTICIPATION = int(os.getenv("POINTS_PARTICIPATION", "2"))
 
 VALORANT_MAPS = [
     "Ascent",
@@ -90,14 +85,12 @@ MAP_IMAGE = {
     "Bind": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/bltfd633927429c40f4/5eb26f6b8c3b8b4d13a56657/Bind_2.jpg",
 }
 
-
 def slug(text: str) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     for sep in ["・", "|", "—", "-", "•", "·", "_", "/"]:
         text = text.replace(sep, " ")
     return " ".join(text.lower().split())
-
 
 # ===================== DATABASE =====================
 class Database:
@@ -112,11 +105,7 @@ class Database:
             """
             CREATE TABLE IF NOT EXISTS players (
                 user_id INTEGER PRIMARY KEY,
-                rank_name TEXT,
-                points INTEGER NOT NULL DEFAULT 0,
-                wins INTEGER NOT NULL DEFAULT 0,
-                losses INTEGER NOT NULL DEFAULT 0,
-                games INTEGER NOT NULL DEFAULT 0
+                rank_name TEXT
             )
             """
         )
@@ -131,14 +120,6 @@ class Database:
                 attack_ids TEXT NOT NULL,
                 defense_ids TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
             )
             """
         )
@@ -204,71 +185,7 @@ class Database:
         )
         self.conn.commit()
 
-    def record_result(self, winners: List[int], losers: List[int]) -> None:
-        for user_id in winners:
-            self.conn.execute(
-                """
-                INSERT INTO players (user_id, points, wins, games)
-                VALUES (?, ?, 1, 1)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    points = points + ?,
-                    wins = wins + 1,
-                    games = games + 1
-                """,
-                (
-                    user_id,
-                    POINTS_PARTICIPATION + POINTS_WIN,
-                    POINTS_PARTICIPATION + POINTS_WIN,
-                ),
-            )
-        for user_id in losers:
-            self.conn.execute(
-                """
-                INSERT INTO players (user_id, points, losses, games)
-                VALUES (?, ?, 1, 1)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    points = points + ?,
-                    losses = losses + 1,
-                    games = games + 1
-                """,
-                (
-                    user_id,
-                    POINTS_PARTICIPATION + POINTS_LOSS,
-                    POINTS_PARTICIPATION + POINTS_LOSS,
-                ),
-            )
-        self.conn.commit()
-
-    def top_players(self, limit: int = 20) -> List[sqlite3.Row]:
-        return list(
-            self.conn.execute(
-                """
-                SELECT user_id, points, wins, losses, games, rank_name
-                FROM players
-                ORDER BY points DESC, wins DESC, games DESC, user_id ASC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        )
-
-    def set_meta(self, key: str, value: str) -> None:
-        self.conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-            (key, value),
-        )
-        self.conn.commit()
-
-    def get_meta(self, key: str) -> Optional[str]:
-        row = self.conn.execute(
-            "SELECT value FROM meta WHERE key = ?",
-            (key,),
-        ).fetchone()
-        return row[0] if row else None
-
-
 db = Database(DB_PATH)
-
 
 @dataclass
 class MatchState:
@@ -292,7 +209,6 @@ class MatchState:
             defense_ids=json.loads(row["defense_ids"]),
         )
 
-
 # ===================== HELPERS =====================
 def rank_value_for_member(member: discord.Member) -> int:
     stored = db.get_player_rank(member.id)
@@ -304,10 +220,8 @@ def rank_value_for_member(member: discord.Member) -> int:
             return RANK_VALUE_BY_NAME[role.name]
     return 0
 
-
 def is_prep_voice(channel: Optional[discord.abc.GuildChannel]) -> bool:
     return isinstance(channel, discord.VoiceChannel) and slug(channel.name) in {slug(n) for n in PREP_CHANNEL_NAMES}
-
 
 def get_verify_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
     return discord.utils.find(
@@ -315,20 +229,11 @@ def get_verify_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
         guild.channels,
     )
 
-
-def get_leaderboard_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
-    return discord.utils.find(
-        lambda c: isinstance(c, discord.TextChannel) and slug(c.name) == slug(LEADERBOARD_CHANNEL_NAME),
-        guild.channels,
-    )
-
-
 async def ensure_role(guild: discord.Guild, role_name: str, *, color: Optional[discord.Color] = None) -> discord.Role:
     role = discord.utils.get(guild.roles, name=role_name)
     if role is None:
         role = await guild.create_role(name=role_name, color=color or discord.Color.default(), reason="PP setup")
     return role
-
 
 async def ensure_core_roles(guild: discord.Guild) -> Dict[str, discord.Role]:
     roles = {
@@ -343,13 +248,14 @@ async def ensure_core_roles(guild: discord.Guild) -> Dict[str, discord.Role]:
         await ensure_role(guild, rank_name)
     return roles
 
-
 async def set_verification_permissions(guild: discord.Guild) -> None:
     roles = await ensure_core_roles(guild)
     non_verified = roles["non_verified"]
     member = roles["member"]
     verify_channel = get_verify_channel(guild)
 
+    # Only hide channels from the temporary non-verified role.
+    # Avoid broad overwrites on @everyone so existing server permissions stay mostly intact.
     for channel in guild.channels:
         if channel == verify_channel:
             continue
@@ -359,13 +265,7 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
             pass
 
     if verify_channel is not None:
-        everyone = guild.default_role
         try:
-            await verify_channel.set_permissions(
-                everyone,
-                view_channel=False,
-                reason="PP verification visible only for new members",
-            )
             await verify_channel.set_permissions(
                 member,
                 view_channel=False,
@@ -374,7 +274,8 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
             await verify_channel.set_permissions(
                 non_verified,
                 view_channel=True,
-                send_messages=True,
+                send_messages=False,
+                add_reactions=False,
                 read_message_history=True,
                 use_application_commands=True,
                 reason="PP verification open for new members",
@@ -382,8 +283,6 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
         except discord.Forbidden:
             pass
 
-    # Make sure voice-chat text is usable inside Préparation channels.
-    everyone = guild.default_role
     for channel_name in PREP_CHANNEL_NAMES:
         prep = discord.utils.find(
             lambda c: isinstance(c, discord.VoiceChannel) and slug(c.name) == slug(channel_name),
@@ -392,17 +291,9 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
         if prep is None:
             continue
         try:
-            await prep.set_permissions(
-                everyone,
-                send_messages=True,
-                read_message_history=True,
-                use_application_commands=True,
-                reason="Enable voice text chat for PP UI",
-            )
             await prep.set_permissions(non_verified, view_channel=False, reason="Hide prep from new members")
         except discord.Forbidden:
             pass
-
 
 async def apply_rank(member: discord.Member, rank_name: str) -> None:
     roles = await ensure_core_roles(member.guild)
@@ -427,7 +318,6 @@ async def apply_rank(member: discord.Member, rank_name: str) -> None:
 
     db.upsert_player_rank(member.id, rank_name)
 
-
 async def clear_team_roles(guild: discord.Guild, members: Optional[List[discord.Member]] = None) -> None:
     attack_role = discord.utils.get(guild.roles, name=TEAM_ATTACK_ROLE)
     defense_role = discord.utils.get(guild.roles, name=TEAM_DEFENSE_ROLE)
@@ -442,7 +332,6 @@ async def clear_team_roles(guild: discord.Guild, members: Optional[List[discord.
                 await member.remove_roles(*to_remove, reason="PP team reset")
             except discord.Forbidden:
                 pass
-
 
 async def apply_team_roles(guild: discord.Guild, attack: List[discord.Member], defense: List[discord.Member]) -> None:
     attack_role = discord.utils.get(guild.roles, name=TEAM_ATTACK_ROLE)
@@ -461,7 +350,6 @@ async def apply_team_roles(guild: discord.Guild, attack: List[discord.Member], d
             await member.add_roles(defense_role, reason="PP teams")
         except discord.Forbidden:
             pass
-
 
 def split_balanced_teams(members: List[discord.Member]) -> Tuple[List[discord.Member], List[discord.Member]]:
     scored = sorted(members, key=rank_value_for_member, reverse=True)
@@ -486,7 +374,6 @@ def split_balanced_teams(members: List[discord.Member]) -> Tuple[List[discord.Me
             score_defense += value
 
     return attack, defense
-
 
 def get_associated_team_channels(prep_channel: discord.VoiceChannel) -> Tuple[Optional[discord.VoiceChannel], Optional[discord.VoiceChannel]]:
     category = prep_channel.category
@@ -515,7 +402,6 @@ def get_associated_team_channels(prep_channel: discord.VoiceChannel) -> Tuple[Op
             defense = vc
     return attack, defense
 
-
 async def move_teams_if_possible(prep_channel: discord.VoiceChannel, attack: List[discord.Member], defense: List[discord.Member]) -> None:
     attack_vc, defense_vc = get_associated_team_channels(prep_channel)
     if attack_vc is None or defense_vc is None:
@@ -535,15 +421,12 @@ async def move_teams_if_possible(prep_channel: discord.VoiceChannel, attack: Lis
             except discord.Forbidden:
                 pass
 
-
 def pick_map(exclude: Optional[str] = None) -> str:
     pool = [m for m in VALORANT_MAPS if m != exclude]
     return random.choice(pool or VALORANT_MAPS)
 
-
 def map_image_url(map_name: str) -> Optional[str]:
     return MAP_IMAGE.get(map_name)
-
 
 def build_match_embed(guild: discord.Guild, state: MatchState) -> discord.Embed:
     attack_mentions = [guild.get_member(user_id).mention for user_id in state.attack_ids if guild.get_member(user_id)]
@@ -557,67 +440,15 @@ def build_match_embed(guild: discord.Guild, state: MatchState) -> discord.Embed:
     )
     embed.add_field(name="⚔️ Attaque", value="\n".join(attack_mentions) if attack_mentions else "—", inline=True)
     embed.add_field(name="🛡️ Défense", value="\n".join(defense_mentions) if defense_mentions else "—", inline=True)
-    embed.add_field(
-        name="Points",
-        value=(
-            f"Victoire: +{POINTS_WIN}\n"
-            f"Défaite: +{POINTS_LOSS}\n"
-            f"Participation: +{POINTS_PARTICIPATION}"
-        ),
-        inline=False,
-    )
     image_url = map_image_url(state.map_name)
     if image_url:
         embed.set_image(url=image_url)
     embed.set_footer(text="Boutons : reroll map • victoire attaque • victoire défense • annuler")
     return embed
 
-
-def build_leaderboard_embed(guild: discord.Guild) -> discord.Embed:
-    rows = db.top_players(limit=20)
-    embed = discord.Embed(title="Classement PP", color=discord.Color.gold())
-    if not rows:
-        embed.description = "Aucun point enregistré pour le moment."
-        return embed
-
-    lines = []
-    for index, row in enumerate(rows, start=1):
-        member = guild.get_member(row["user_id"])
-        name = member.display_name if member else f"Utilisateur {row['user_id']}"
-        rank = row["rank_name"] or "—"
-        lines.append(
-            f"**{index}.** {name} — **{row['points']} pts** | W: {row['wins']} | L: {row['losses']} | G: {row['games']} | Rank: {rank}"
-        )
-    embed.description = "\n".join(lines)
-    embed.set_footer(text="Mis à jour automatiquement à la fin de chaque partie")
-    return embed
-
-
-async def refresh_leaderboard(guild: discord.Guild) -> None:
-    channel = get_leaderboard_channel(guild)
-    if channel is None:
-        return
-
-    embed = build_leaderboard_embed(guild)
-    meta_key = f"leaderboard_message_id:{guild.id}"
-    raw_message_id = db.get_meta(meta_key)
-
-    if raw_message_id:
-        try:
-            message = await channel.fetch_message(int(raw_message_id))
-            await message.edit(embed=embed, content=None, view=None)
-            return
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException, ValueError):
-            pass
-
-    message = await channel.send(embed=embed)
-    db.set_meta(meta_key, str(message.id))
-
-
 def load_match_state(prep_channel_id: int) -> Optional[MatchState]:
     row = db.get_active_match(prep_channel_id)
     return MatchState.from_row(row) if row else None
-
 
 def is_match_controller(member: discord.Member, state: MatchState) -> bool:
     if member.guild_permissions.administrator:
@@ -625,7 +456,6 @@ def is_match_controller(member: discord.Member, state: MatchState) -> bool:
     if member.id == state.started_by_id:
         return True
     return any(role.name == ORGA_ROLE for role in member.roles)
-
 
 # ===================== UI: VERIFICATION =====================
 class RankSelect(discord.ui.Select):
@@ -653,12 +483,10 @@ class RankSelect(discord.ui.Select):
             ephemeral=True,
         )
 
-
 class VerificationView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(RankSelect())
-
 
 # ===================== UI: /pp MATCH =====================
 class PPStartModal(discord.ui.Modal, title="Lancer une partie perso"):
@@ -677,6 +505,13 @@ class PPStartModal(discord.ui.Modal, title="Lancer une partie perso"):
         if not is_prep_voice(prep_channel):
             return await interaction.response.send_message(
                 "Tu dois être connecté dans **Préparation 1-4** pour utiliser `/pp`.",
+                ephemeral=True,
+            )
+
+        existing_state = load_match_state(prep_channel.id)
+        if existing_state is not None:
+            return await interaction.response.send_message(
+                f"Une partie est déjà active dans **{prep_channel.name}**. Termine-la ou utilise `/pp_cleanup`.",
                 ephemeral=True,
             )
 
@@ -725,7 +560,6 @@ class PPStartModal(discord.ui.Modal, title="Lancer une partie perso"):
             f"✅ Partie créée dans le chat de **{prep_channel.name}**.",
             ephemeral=True,
         )
-
 
 class PPMatchView(discord.ui.View):
     def __init__(self):
@@ -796,6 +630,10 @@ class PPMatchView(discord.ui.View):
             embed=None,
             view=None,
         )
+        try:
+            await prep_channel.send("❌ La partie active a été annulée.")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
     async def _finish_match(self, interaction: discord.Interaction, *, winners_are_attack: bool) -> None:
         if not isinstance(interaction.user, discord.Member):
@@ -806,27 +644,21 @@ class PPMatchView(discord.ui.View):
         if not is_match_controller(interaction.user, state):
             return await interaction.response.send_message("Réservé au créateur de la partie, Orga PP ou admin.", ephemeral=True)
 
-        winners = state.attack_ids if winners_are_attack else state.defense_ids
-        losers = state.defense_ids if winners_are_attack else state.attack_ids
-        db.record_result(winners, losers)
         db.delete_active_match(prep_channel.id)
 
         members = [m for m in interaction.guild.members if m.id in state.attack_ids + state.defense_ids]
         await clear_team_roles(interaction.guild, members)
-        await refresh_leaderboard(interaction.guild)
 
         winning_side = "Attaque" if winners_are_attack else "Défense"
-        points_win_total = POINTS_PARTICIPATION + POINTS_WIN
-        points_loss_total = POINTS_PARTICIPATION + POINTS_LOSS
         await interaction.response.edit_message(
-            content=(
-                f"🏁 Match terminé — **{winning_side}** gagne. "
-                f"Winners: +{points_win_total} pts | Losers: +{points_loss_total} pts"
-            ),
+            content=f"🏁 Match terminé — **{winning_side}** gagne.",
             embed=None,
             view=None,
         )
-
+        try:
+            await prep_channel.send(f"🏁 Partie terminée. **{winning_side}** gagne.")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
 # ===================== BOT =====================
 class PPBot(commands.Bot):
@@ -843,15 +675,12 @@ class PPBot(commands.Bot):
         else:
             await self.tree.sync()
 
-
 bot = PPBot()
-
 
 # ===================== EVENTS =====================
 @bot.event
 async def on_ready() -> None:
     print(f"[OK] Connecté en tant que {bot.user} ({bot.user.id})")
-
 
 @bot.event
 async def on_member_join(member: discord.Member) -> None:
@@ -860,7 +689,6 @@ async def on_member_join(member: discord.Member) -> None:
         await member.add_roles(roles["non_verified"], reason="PP new member verification")
     except discord.Forbidden:
         pass
-
 
 # ===================== COMMANDS =====================
 @bot.tree.command(name="setup_pp", description="Configure les rôles, permissions et panneaux PP sur les salons existants.")
@@ -874,13 +702,10 @@ async def setup_pp(interaction: discord.Interaction) -> None:
     await set_verification_permissions(guild)
 
     verify_channel = get_verify_channel(guild)
-    leaderboard_channel = get_leaderboard_channel(guild)
 
     missing: List[str] = []
     if verify_channel is None:
         missing.append(f"#{VERIFY_CHANNEL_NAME}")
-    if leaderboard_channel is None:
-        missing.append(f"#{LEADERBOARD_CHANNEL_NAME}")
     for name in PREP_CHANNEL_NAMES:
         found = discord.utils.find(
             lambda c: isinstance(c, discord.VoiceChannel) and slug(c.name) == slug(name),
@@ -903,15 +728,12 @@ async def setup_pp(interaction: discord.Interaction) -> None:
             )
             await verify_channel.send(embed=embed, view=VerificationView())
 
-    await refresh_leaderboard(guild)
-
     text = "✅ Setup terminé.\n"
     if missing:
         text += "⚠️ Salons introuvables : " + ", ".join(missing)
     else:
         text += "Tous les salons requis ont été trouvés."
     await interaction.followup.send(text, ephemeral=True)
-
 
 @bot.tree.command(name="pp", description="Lance une partie perso depuis ton vocal Préparation.")
 @app_commands.guild_only()
@@ -924,42 +746,12 @@ async def pp(interaction: discord.Interaction) -> None:
             "Tu dois être connecté dans **Préparation 1, 2, 3 ou 4** pour lancer `/pp`.",
             ephemeral=True,
         )
+    if load_match_state(prep_channel.id) is not None:
+        return await interaction.response.send_message(
+            f"Une partie est déjà active dans **{prep_channel.name}**. Termine-la avec les boutons du panneau ou `/pp_cleanup`.",
+            ephemeral=True,
+        )
     await interaction.response.send_modal(PPStartModal())
-
-
-@bot.tree.command(name="points", description="Affiche les points d'un joueur.")
-@app_commands.guild_only()
-@app_commands.describe(membre="Laisse vide pour toi-même")
-async def points(interaction: discord.Interaction, membre: Optional[discord.Member] = None) -> None:
-    target = membre or interaction.user
-    row = db.conn.execute(
-        "SELECT points, wins, losses, games, rank_name FROM players WHERE user_id = ?",
-        (target.id,),
-    ).fetchone()
-    if row is None:
-        return await interaction.response.send_message(f"Aucune stat pour {target.mention}.", ephemeral=True)
-
-    await interaction.response.send_message(
-        (
-            f"**{target.display_name}**\n"
-            f"Points: **{row['points']}**\n"
-            f"Wins: **{row['wins']}**\n"
-            f"Losses: **{row['losses']}**\n"
-            f"Games: **{row['games']}**\n"
-            f"Rank: **{row['rank_name'] or '—'}**"
-        ),
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="classement_refresh", description="Force la mise à jour du classement.")
-@app_commands.guild_only()
-@app_commands.checks.has_permissions(manage_guild=True)
-async def classement_refresh(interaction: discord.Interaction) -> None:
-    await interaction.response.defer(ephemeral=True)
-    await refresh_leaderboard(interaction.guild)
-    await interaction.followup.send("✅ Classement mis à jour.", ephemeral=True)
-
 
 @bot.tree.command(name="pp_cleanup", description="Retire les rôles d'équipe et ferme la partie active du vocal où tu es.")
 @app_commands.guild_only()
@@ -982,13 +774,11 @@ async def pp_cleanup(interaction: discord.Interaction) -> None:
     db.delete_active_match(prep_channel.id)
     await interaction.response.send_message("✅ Partie active nettoyée.", ephemeral=True)
 
-
 # ===================== RUN =====================
 def main() -> None:
     if not TOKEN:
         raise RuntimeError("DISCORD_BOT_TOKEN manquant dans le .env")
     bot.run(TOKEN)
-
 
 if __name__ == "__main__":
     main()
