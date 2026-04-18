@@ -2,6 +2,8 @@ import json
 import os
 import random
 import sqlite3
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import unicodedata
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -774,10 +776,42 @@ async def pp_cleanup(interaction: discord.Interaction) -> None:
     db.delete_active_match(prep_channel.id)
     await interaction.response.send_message("✅ Partie active nettoyée.", ephemeral=True)
 
+# ===================== RENDER WEB HEALTH SERVER =====================
+WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
+WEB_PORT = int(os.getenv("PORT", os.getenv("WEB_PORT", "10000")))
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/", "/health", "/healthz"):
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            body = b"not found"
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+def start_health_server() -> ThreadingHTTPServer:
+    server = ThreadingHTTPServer((WEB_HOST, WEB_PORT), _HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"[HTTP] Health server listening on http://{WEB_HOST}:{WEB_PORT}")
+    return server
+
 # ===================== RUN =====================
 def main() -> None:
     if not TOKEN:
         raise RuntimeError("DISCORD_BOT_TOKEN manquant dans le .env")
+    start_health_server()
     bot.run(TOKEN)
 
 if __name__ == "__main__":
