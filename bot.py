@@ -661,7 +661,7 @@ class RankSelect(discord.ui.Select):
             for name, _ in RANK_OPTIONS
         ]
         super().__init__(
-            placeholder="Choisis ton PEAK rank Valorant des 3 derniers actes",
+            placeholder="Choisis ton rank Valorant",
             min_values=1,
             max_values=1,
             options=options,
