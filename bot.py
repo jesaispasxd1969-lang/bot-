@@ -30,6 +30,24 @@ PREP_CHANNEL_NAMES = [
     if name.strip()
 ]
 
+VERIFY_CHANNEL_ALIASES = [
+    name.strip()
+    for name in os.getenv(
+        "VERIFY_CHANNEL_ALIASES",
+        f"{VERIFY_CHANNEL_NAME},vérification,verification-rank,verif",
+    ).split(",")
+    if name.strip()
+]
+HOME_CATEGORY_NAME = os.getenv("HOME_CATEGORY_NAME", "KAER MORHEN")
+TAVERN_CATEGORY_NAME = os.getenv("TAVERN_CATEGORY_NAME", "TAVERNE")
+PARTY_CATEGORY_NAME = os.getenv("PARTY_CATEGORY_NAME", "PARTIE PERSO")
+ORGA_TEXT_CHANNEL_NAME = os.getenv("ORGA_TEXT_CHANNEL_NAME", "orga-pp")
+READ_ONLY_TEXT_CHANNEL_NAMES = [
+    name.strip()
+    for name in os.getenv("READ_ONLY_TEXT_CHANNEL_NAMES", "règlement,annonces").split(",")
+    if name.strip()
+]
+
 NON_VERIFIED_ROLE = os.getenv("NON_VERIFIED_ROLE", "Non vérifié")
 MEMBER_ROLE = os.getenv("MEMBER_ROLE", "Membre")
 ORGA_ROLE = os.getenv("ORGA_ROLE", "Orga PP")
@@ -293,11 +311,25 @@ def is_prep_voice(channel: Optional[discord.abc.GuildChannel]) -> bool:
     return isinstance(channel, discord.VoiceChannel) and slug(channel.name) in {slug(n) for n in PREP_CHANNEL_NAMES}
 
 
-def get_verify_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+def find_category(guild: discord.Guild, name: str) -> Optional[discord.CategoryChannel]:
     return discord.utils.find(
-        lambda c: isinstance(c, discord.TextChannel) and slug(c.name) == slug(VERIFY_CHANNEL_NAME),
-        guild.channels,
+        lambda c: isinstance(c, discord.CategoryChannel) and slug(c.name) == slug(name),
+        guild.categories,
     )
+
+
+def find_text_channel(guild: discord.Guild, aliases: List[str], *, category: Optional[discord.CategoryChannel] = None) -> Optional[discord.TextChannel]:
+    wanted = {slug(name) for name in aliases if name}
+    channels = category.text_channels if category is not None else guild.text_channels
+    return discord.utils.find(
+        lambda c: isinstance(c, discord.TextChannel) and slug(c.name) in wanted,
+        channels,
+    )
+
+
+def get_verify_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    aliases = [VERIFY_CHANNEL_NAME, *VERIFY_CHANNEL_ALIASES]
+    return find_text_channel(guild, aliases)
 
 
 async def ensure_role(guild: discord.Guild, role_name: str, *, color: Optional[discord.Color] = None) -> discord.Role:
@@ -308,60 +340,204 @@ async def ensure_role(guild: discord.Guild, role_name: str, *, color: Optional[d
 
 
 async def ensure_core_roles(guild: discord.Guild) -> Dict[str, discord.Role]:
+    player_role = await ensure_role(guild, PLAYER_ROLE)
     roles = {
         "non_verified": await ensure_role(guild, NON_VERIFIED_ROLE),
-        "member": await ensure_role(guild, MEMBER_ROLE),
+        "member": player_role,  # rôle d'accès vérifié = Joueur
         "orga": await ensure_role(guild, ORGA_ROLE),
         "attack": await ensure_role(guild, TEAM_ATTACK_ROLE),
         "defense": await ensure_role(guild, TEAM_DEFENSE_ROLE),
-        "player": await ensure_role(guild, PLAYER_ROLE),
+        "player": player_role,
     }
+    # rôle legacy éventuel ; on le laisse exister si déjà utilisé ailleurs
+    if MEMBER_ROLE != PLAYER_ROLE:
+        await ensure_role(guild, MEMBER_ROLE)
     for rank_name, _ in RANK_OPTIONS:
         await ensure_role(guild, rank_name)
     return roles
 
+async def sync_existing_membership_roles(guild: discord.Guild) -> None:
+    roles = await ensure_core_roles(guild)
+    verified_role = roles["player"]
+    non_verified_role = roles["non_verified"]
+
+    for member in guild.members:
+        if member.bot:
+            continue
+        if non_verified_role in member.roles:
+            continue
+        if verified_role in member.roles:
+            continue
+        try:
+            await member.add_roles(verified_role, reason="PP setup membership sync")
+        except discord.Forbidden:
+            pass
+
+
+
+async def _safe_set_permissions(channel: discord.abc.GuildChannel, target: discord.abc.Snowflake, **kwargs) -> None:
+    try:
+        await channel.set_permissions(target, reason="PP access setup", **kwargs)
+    except discord.Forbidden:
+        pass
+
+
+async def _configure_text_channel(
+    channel: discord.TextChannel,
+    *,
+    default_role: discord.Role,
+    non_verified: discord.Role,
+    member: discord.Role,
+    orga: discord.Role,
+    member_can_write: bool,
+    visible_to_member: bool = True,
+    visible_to_orga: bool = True,
+) -> None:
+    await _safe_set_permissions(channel, default_role, view_channel=False, send_messages=False, add_reactions=False)
+    await _safe_set_permissions(channel, non_verified, view_channel=False, send_messages=False, add_reactions=False)
+    await _safe_set_permissions(
+        channel,
+        member,
+        view_channel=visible_to_member,
+        send_messages=member_can_write if visible_to_member else False,
+        add_reactions=member_can_write if visible_to_member else False,
+        read_message_history=visible_to_member,
+        use_application_commands=visible_to_member,
+    )
+    await _safe_set_permissions(
+        channel,
+        orga,
+        view_channel=visible_to_orga,
+        send_messages=visible_to_orga,
+        add_reactions=visible_to_orga,
+        read_message_history=visible_to_orga,
+        use_application_commands=visible_to_orga,
+        manage_messages=visible_to_orga,
+    )
+
+
+async def _configure_voice_channel(
+    channel: discord.VoiceChannel,
+    *,
+    default_role: discord.Role,
+    non_verified: discord.Role,
+    member: discord.Role,
+    orga: discord.Role,
+    member_can_connect: bool = True,
+    orga_can_connect: bool = True,
+) -> None:
+    await _safe_set_permissions(channel, default_role, view_channel=False, connect=False, send_messages=False)
+    await _safe_set_permissions(channel, non_verified, view_channel=False, connect=False, send_messages=False)
+    await _safe_set_permissions(
+        channel,
+        member,
+        view_channel=True,
+        connect=member_can_connect,
+        speak=member_can_connect,
+        stream=member_can_connect,
+        use_voice_activation=member_can_connect,
+        send_messages=True,
+        read_message_history=True,
+        use_application_commands=True,
+    )
+    await _safe_set_permissions(
+        channel,
+        orga,
+        view_channel=True,
+        connect=orga_can_connect,
+        speak=orga_can_connect,
+        stream=orga_can_connect,
+        use_voice_activation=orga_can_connect,
+        send_messages=True,
+        read_message_history=True,
+        use_application_commands=True,
+        move_members=True,
+        mute_members=True,
+        deafen_members=True,
+    )
+
 
 async def set_verification_permissions(guild: discord.Guild) -> None:
     roles = await ensure_core_roles(guild)
+    await sync_existing_membership_roles(guild)
+
+    default_role = guild.default_role
     non_verified = roles["non_verified"]
     member = roles["member"]
+    orga = roles["orga"]
+
     verify_channel = get_verify_channel(guild)
+    home_category = find_category(guild, HOME_CATEGORY_NAME)
+    tavern_category = find_category(guild, TAVERN_CATEGORY_NAME)
+    party_category = find_category(guild, PARTY_CATEGORY_NAME)
+    orga_channel = find_text_channel(guild, [ORGA_TEXT_CHANNEL_NAME, "orga pp"], category=party_category)
+    read_only_names = {slug(name) for name in READ_ONLY_TEXT_CHANNEL_NAMES}
 
     for channel in guild.channels:
         if channel == verify_channel:
             continue
-        try:
-            await channel.set_permissions(non_verified, view_channel=False, reason="PP verification lock")
-        except discord.Forbidden:
-            pass
+        await _safe_set_permissions(channel, non_verified, view_channel=False, connect=False, send_messages=False)
 
     if verify_channel is not None:
-        try:
-            await verify_channel.set_permissions(
-                guild.default_role,
-                view_channel=False,
-                send_messages=False,
-                add_reactions=False,
-                reason="Verification hidden by default",
+        await _safe_set_permissions(verify_channel, default_role, view_channel=False, send_messages=False, add_reactions=False)
+        await _safe_set_permissions(verify_channel, member, view_channel=False, send_messages=False, add_reactions=False)
+        await _safe_set_permissions(
+            verify_channel,
+            non_verified,
+            view_channel=True,
+            send_messages=False,
+            add_reactions=False,
+            read_message_history=True,
+            use_application_commands=True,
+        )
+        await _safe_set_permissions(
+            verify_channel,
+            orga,
+            view_channel=True,
+            send_messages=True,
+            add_reactions=True,
+            read_message_history=True,
+            use_application_commands=True,
+            manage_messages=True,
+        )
+
+    categories = [cat for cat in [home_category, tavern_category, party_category] if cat is not None]
+    for category in categories:
+        for text_channel in category.text_channels:
+            if verify_channel is not None and text_channel.id == verify_channel.id:
+                continue
+            if orga_channel is not None and text_channel.id == orga_channel.id:
+                await _configure_text_channel(
+                    text_channel,
+                    default_role=default_role,
+                    non_verified=non_verified,
+                    member=member,
+                    orga=orga,
+                    member_can_write=False,
+                    visible_to_member=False,
+                    visible_to_orga=True,
+                )
+                continue
+            member_can_write = slug(text_channel.name) not in read_only_names
+            await _configure_text_channel(
+                text_channel,
+                default_role=default_role,
+                non_verified=non_verified,
+                member=member,
+                orga=orga,
+                member_can_write=member_can_write,
+                visible_to_member=True,
+                visible_to_orga=True,
             )
-            await verify_channel.set_permissions(
-                member,
-                view_channel=False,
-                send_messages=False,
-                add_reactions=False,
-                reason="Verification hidden after validation",
+
+        for voice_channel in category.voice_channels:
+            await _configure_voice_channel(
+                voice_channel,
+                default_role=default_role,
+                non_verified=non_verified,
+                member=member,
+                orga=orga,
             )
-            await verify_channel.set_permissions(
-                non_verified,
-                view_channel=True,
-                send_messages=False,
-                add_reactions=False,
-                read_message_history=True,
-                use_application_commands=True,
-                reason="Verification visible only for new members",
-            )
-        except discord.Forbidden:
-            pass
 
     for channel_name in PREP_CHANNEL_NAMES:
         prep = discord.utils.find(
@@ -370,10 +546,13 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
         )
         if prep is None:
             continue
-        try:
-            await prep.set_permissions(non_verified, view_channel=False, reason="Hide prep from new members")
-        except discord.Forbidden:
-            pass
+        await _configure_voice_channel(
+            prep,
+            default_role=default_role,
+            non_verified=non_verified,
+            member=member,
+            orga=orga,
+        )
 
 
 async def apply_rank(member: discord.Member, rank_name: str) -> None:
@@ -389,7 +568,7 @@ async def apply_rank(member: discord.Member, rank_name: str) -> None:
         except discord.Forbidden:
             pass
 
-    add_roles = [rank_role, roles["member"], roles["player"]]
+    add_roles = [rank_role, roles["player"]]
     missing = [r for r in add_roles if r not in member.roles]
     if missing:
         try:
@@ -956,7 +1135,7 @@ async def setup_pp(interaction: discord.Interaction) -> None:
     verify_channel = get_verify_channel(guild)
     missing: List[str] = []
     if verify_channel is None:
-        missing.append(f"#{VERIFY_CHANNEL_NAME}")
+        missing.append(f"#{VERIFY_CHANNEL_NAME} (ou alias de vérification)")
     for name in PREP_CHANNEL_NAMES:
         found = discord.utils.find(
             lambda c: isinstance(c, discord.VoiceChannel) and slug(c.name) == slug(name),
