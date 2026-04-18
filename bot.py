@@ -48,6 +48,7 @@ TAVERN_CATEGORY_NAME = os.getenv("TAVERN_CATEGORY_NAME", "TAVERNE")
 PARTY_CATEGORY_NAME = os.getenv("PARTY_CATEGORY_NAME", "PARTIE PERSO")
 ORGA_TEXT_CHANNEL_NAME = os.getenv("ORGA_TEXT_CHANNEL_NAME", "orga-pp")
 WELCOME_CHANNEL_NAME = os.getenv("WELCOME_CHANNEL_NAME", "bienvenue")
+CUSTOM_VOICE_CATEGORY_ID = int(os.getenv("CUSTOM_VOICE_CATEGORY_ID", "1460123537560965224"))
 CUSTOM_VOICE_CATEGORY_NAME = os.getenv("CUSTOM_VOICE_CATEGORY_NAME", TAVERN_CATEGORY_NAME)
 CUSTOM_VOICE_DEFAULT_LIMIT = int(os.getenv("CUSTOM_VOICE_DEFAULT_LIMIT", "0"))
 CREATE_VOICE_TRIGGER_NAME = os.getenv("CREATE_VOICE_TRIGGER_NAME", "Créer un salon")
@@ -733,7 +734,9 @@ async def set_custom_voice_permissions(channel: discord.VoiceChannel, *, owner: 
 
 
 async def create_custom_voice_channel(guild: discord.Guild, owner: discord.Member, name: str, user_limit: int = 0) -> discord.VoiceChannel:
-    category = find_category(guild, CUSTOM_VOICE_CATEGORY_NAME) or find_category(guild, TAVERN_CATEGORY_NAME)
+    category = guild.get_channel(CUSTOM_VOICE_CATEGORY_ID)
+    if not isinstance(category, discord.CategoryChannel):
+        category = find_category(guild, CUSTOM_VOICE_CATEGORY_NAME) or find_category(guild, TAVERN_CATEGORY_NAME)
     channel = await guild.create_voice_channel(name=name, category=category, user_limit=max(0, min(99, user_limit)))
     db.register_custom_voice(channel.id, owner.id)
     await set_custom_voice_permissions(channel, owner=owner, locked=False)
@@ -1640,7 +1643,7 @@ async def setup_pp(interaction: discord.Interaction) -> None:
             )
             await verify_channel.send(embed=embed, view=VerificationView(guild))
 
-    text = "✅ Setup terminé.\n• Rejoins **Créer un salon** pour générer une voc privée avec panneau de boutons.\n"
+    text = "✅ Setup terminé.\n• Rejoins **Créer un salon** pour générer une voc privée avec panneau de boutons dans la catégorie configurée.\n"
     if missing:
         text += "⚠️ Salons introuvables : " + ", ".join(missing)
     else:
