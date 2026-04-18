@@ -4,6 +4,8 @@ import random
 import sqlite3
 import threading
 import unicodedata
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Tuple
@@ -104,7 +106,7 @@ RANK_TIER_EMOJI = {
     "Immortal": "👑",
 }
 
-MAP_IMAGE = {
+FALLBACK_MAP_IMAGE = {
     "Haven": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blt1f6b8f00f50f1d2d/5eb26f538c3b8b4d13a56656/Haven_2.jpg",
     "Corrode": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blt2b5d5f8bde7975ed/66882f7d0ea0db6b7c80a8d3/Corrode_Splash.jpg",
     "Icebox": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/blteae6cfc448f942f4/5ed5667f6f8c0d0fe64f2d2d/Icebox_2.jpg",
@@ -118,6 +120,47 @@ MAP_IMAGE = {
     "Fracture": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/bltd5f9ce7bf65d7c44/61787db31b09f3266d6f294e/Fracture_2.jpg",
     "Bind": "https://images.contentstack.io/v3/assets/bltb6530b271fddd0b1/bltfd633927429c40f4/5eb26f6b8c3b8b4d13a56657/Bind_2.jpg",
 }
+
+VALORANT_MAPS_API_URL = os.getenv("VALORANT_MAPS_API_URL", "https://valorant-api.com/v1/maps")
+MAP_IMAGE_CACHE: Dict[str, str] = dict(FALLBACK_MAP_IMAGE)
+MAP_IMAGE_CACHE_LOADED = False
+
+
+def refresh_map_image_cache() -> None:
+    global MAP_IMAGE_CACHE_LOADED
+    request = urllib.request.Request(
+        VALORANT_MAPS_API_URL,
+        headers={"User-Agent": "Mozilla/5.0 DiscordBot/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return
+
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        return
+
+    updated = dict(FALLBACK_MAP_IMAGE)
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        display_name = item.get("displayName")
+        if not display_name:
+            continue
+        image_url = (
+            item.get("splash")
+            or item.get("stylizedBackground")
+            or item.get("displayIcon")
+            or item.get("listViewIcon")
+        )
+        if image_url:
+            updated[display_name] = image_url
+
+    MAP_IMAGE_CACHE.clear()
+    MAP_IMAGE_CACHE.update(updated)
+    MAP_IMAGE_CACHE_LOADED = True
 
 # Ordre d'arrivée dans chaque vocal Préparation.
 JOIN_SEQUENCE = 0
@@ -721,7 +764,13 @@ def pick_map(exclude: Optional[str] = None) -> str:
 
 
 def map_image_url(map_name: str) -> Optional[str]:
-    return MAP_IMAGE.get(map_name)
+    global MAP_IMAGE_CACHE_LOADED
+    image_url = MAP_IMAGE_CACHE.get(map_name)
+    if image_url:
+        return image_url
+    if not MAP_IMAGE_CACHE_LOADED:
+        refresh_map_image_cache()
+    return MAP_IMAGE_CACHE.get(map_name)
 
 
 def load_match_state(prep_channel_id: int) -> Optional[MatchState]:
@@ -806,6 +855,8 @@ def build_match_embed(guild: discord.Guild, state: MatchState) -> discord.Embed:
     image_url = map_image_url(state.map_name)
     if image_url:
         embed.set_image(url=image_url)
+    else:
+        embed.add_field(name="🖼️ Image de map", value="Image indisponible pour cette map.", inline=False)
     embed.set_footer(text="Vote map • Lancer la PP • Annuler")
     return embed
 
@@ -1091,6 +1142,7 @@ bot = PPBot()
 @bot.event
 async def on_ready() -> None:
     await seed_existing_prep_members(bot.guilds)
+    refresh_map_image_cache()
     print(f"[OK] Connecté en tant que {bot.user} ({bot.user.id})")
 
 
