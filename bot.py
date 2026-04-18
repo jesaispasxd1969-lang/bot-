@@ -50,6 +50,15 @@ ORGA_TEXT_CHANNEL_NAME = os.getenv("ORGA_TEXT_CHANNEL_NAME", "orga-pp")
 WELCOME_CHANNEL_NAME = os.getenv("WELCOME_CHANNEL_NAME", "bienvenue")
 CUSTOM_VOICE_CATEGORY_NAME = os.getenv("CUSTOM_VOICE_CATEGORY_NAME", TAVERN_CATEGORY_NAME)
 CUSTOM_VOICE_DEFAULT_LIMIT = int(os.getenv("CUSTOM_VOICE_DEFAULT_LIMIT", "0"))
+CREATE_VOICE_TRIGGER_NAME = os.getenv("CREATE_VOICE_TRIGGER_NAME", "Créer un salon")
+CREATE_VOICE_TRIGGER_ALIASES = [
+    name.strip()
+    for name in os.getenv(
+        "CREATE_VOICE_TRIGGER_ALIASES",
+        f"{CREATE_VOICE_TRIGGER_NAME},creer un salon,+ creer un salon,+ créer un salon",
+    ).split(",")
+    if name.strip()
+]
 READ_ONLY_TEXT_CHANNEL_NAMES = [
     name.strip()
     for name in os.getenv("READ_ONLY_TEXT_CHANNEL_NAMES", "règlement,annonces").split(",")
@@ -430,6 +439,18 @@ def is_custom_voice(channel: Optional[discord.abc.GuildChannel]) -> bool:
     return isinstance(channel, discord.VoiceChannel) and db.get_custom_voice_owner(channel.id) is not None
 
 
+def is_create_voice_trigger(channel: Optional[discord.abc.GuildChannel]) -> bool:
+    return isinstance(channel, discord.VoiceChannel) and slug(channel.name) in {slug(n) for n in CREATE_VOICE_TRIGGER_ALIASES}
+
+
+def custom_voice_locked(channel: discord.VoiceChannel) -> bool:
+    player_role = discord.utils.get(channel.guild.roles, name=PLAYER_ROLE)
+    if player_role is None:
+        return False
+    overwrite = channel.overwrites_for(player_role)
+    return overwrite.connect is False
+
+
 def can_manage_custom_voice(member: discord.Member, channel: Optional[discord.VoiceChannel]) -> bool:
     if not isinstance(channel, discord.VoiceChannel):
         return False
@@ -730,6 +751,53 @@ async def cleanup_custom_voice_if_empty(channel: discord.VoiceChannel) -> None:
             await channel.delete(reason="Temporary custom voice empty")
         except (discord.Forbidden, discord.HTTPException):
             pass
+
+
+async def _build_custom_voice_panel_embed(channel: discord.VoiceChannel) -> discord.Embed:
+    owner_id = db.get_custom_voice_owner(channel.id)
+    owner = channel.guild.get_member(owner_id) if owner_id else None
+    embed = discord.Embed(
+        title=f"🎤 {channel.name}",
+        description=(
+            "Bienvenue dans ton salon privé, sorceleur.\n"
+            "Utilise les boutons ci-dessous pour **verrouiller**, **renommer**, "
+            "**changer les slots** ou **expulser** quelqu’un de la voc."
+        ),
+        color=discord.Color.dark_gold(),
+    )
+    embed.add_field(name="Propriétaire", value=owner.mention if owner else "Inconnu", inline=True)
+    embed.add_field(name="État", value="🔒 Verrouillé" if custom_voice_locked(channel) else "🔓 Ouvert", inline=True)
+    embed.add_field(name="Slots", value=str(channel.user_limit) if channel.user_limit else "∞", inline=True)
+    embed.set_footer(text="Réservé au propriétaire du salon, Orga PP ou admin.")
+    return embed
+
+
+async def ensure_custom_voice_panel(channel: discord.VoiceChannel) -> None:
+    try:
+        async for msg in channel.history(limit=30):
+            if msg.author == channel.guild.me and msg.components:
+                return
+    except (discord.Forbidden, discord.HTTPException):
+        return
+
+    try:
+        msg = await channel.send(embed=await _build_custom_voice_panel_embed(channel), view=CustomVoiceControlView())
+        try:
+            await msg.pin()
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def refresh_custom_voice_panel(channel: discord.VoiceChannel) -> None:
+    try:
+        async for msg in channel.history(limit=30):
+            if msg.author == channel.guild.me and msg.components:
+                await msg.edit(embed=await _build_custom_voice_panel_embed(channel), view=CustomVoiceControlView())
+                return
+    except (discord.Forbidden, discord.HTTPException):
+        return
 
 
 async def apply_rank(member: discord.Member, rank_name: str) -> None:
@@ -1298,6 +1366,147 @@ class PPMatchView(discord.ui.View):
             pass
 
 
+class CustomVoiceRenameModal(discord.ui.Modal, title="Renommer le salon privé"):
+    new_name = discord.ui.TextInput(label="Nouveau nom", max_length=100)
+
+    def __init__(self, channel_id: int):
+        super().__init__()
+        self.channel_id = channel_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+        channel = interaction.guild.get_channel(self.channel_id) if interaction.guild else None
+        if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
+            return await interaction.response.send_message("Tu ne peux pas gérer ce salon.", ephemeral=True)
+        name = str(self.new_name.value).strip()
+        if len(name) < 2:
+            return await interaction.response.send_message("Nom trop court.", ephemeral=True)
+        await channel.edit(name=name, reason="Custom voice rename via UI")
+        await refresh_custom_voice_panel(channel)
+        await interaction.response.send_message(f"✏️ Salon renommé en **{name}**.", ephemeral=True)
+
+
+class CustomVoiceLimitModal(discord.ui.Modal, title="Changer la limite de slots"):
+    slots = discord.ui.TextInput(label="Nombre de places (0 = illimité)", max_length=2, placeholder="0-99")
+
+    def __init__(self, channel_id: int):
+        super().__init__()
+        self.channel_id = channel_id
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+        channel = interaction.guild.get_channel(self.channel_id) if interaction.guild else None
+        if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
+            return await interaction.response.send_message("Tu ne peux pas gérer ce salon.", ephemeral=True)
+        try:
+            limit = max(0, min(99, int(str(self.slots.value).strip())))
+        except ValueError:
+            return await interaction.response.send_message("Entre un nombre valide entre 0 et 99.", ephemeral=True)
+        await channel.edit(user_limit=limit, reason="Custom voice limit via UI")
+        await refresh_custom_voice_panel(channel)
+        shown = str(limit) if limit else "∞"
+        await interaction.response.send_message(f"👥 Limite mise à **{shown}**.", ephemeral=True)
+
+
+class CustomVoiceKickSelect(discord.ui.Select):
+    def __init__(self, channel: discord.VoiceChannel, requester_id: int):
+        self.channel_id = channel.id
+        self.requester_id = requester_id
+        options = [
+            discord.SelectOption(label=m.display_name[:100], value=str(m.id))
+            for m in channel.members[:25]
+            if not m.bot and m.id != requester_id
+        ]
+        super().__init__(placeholder="Choisis qui expulser", min_values=1, max_values=1, options=options)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.requester_id:
+            return await interaction.response.send_message("Cette sélection ne t’est pas destinée.", ephemeral=True)
+        if not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+        channel = interaction.guild.get_channel(self.channel_id) if interaction.guild else None
+        if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
+            return await interaction.response.send_message("Tu ne peux pas gérer ce salon.", ephemeral=True)
+        member = interaction.guild.get_member(int(self.values[0])) if interaction.guild else None
+        if member is None or not member.voice or member.voice.channel.id != channel.id:
+            return await interaction.response.send_message("Ce membre n'est plus dans la voc.", ephemeral=True)
+        try:
+            await member.move_to(None, reason=f"Disconnected from private voice by {interaction.user}")
+        except (discord.Forbidden, discord.HTTPException):
+            return await interaction.response.send_message("Impossible de déconnecter ce membre.", ephemeral=True)
+        await refresh_custom_voice_panel(channel)
+        await interaction.response.send_message(f"⛔ {member.mention} a été déconnecté.", ephemeral=True)
+
+
+class CustomVoiceKickView(discord.ui.View):
+    def __init__(self, channel: discord.VoiceChannel, requester_id: int):
+        super().__init__(timeout=60)
+        self.add_item(CustomVoiceKickSelect(channel, requester_id))
+
+
+class CustomVoiceControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _resolve(self, interaction: discord.Interaction) -> Optional[discord.VoiceChannel]:
+        channel = interaction.channel
+        if not isinstance(channel, discord.VoiceChannel) or not is_custom_voice(channel):
+            await interaction.response.send_message("Ce panneau doit être utilisé dans le chat d’une voc privée.", ephemeral=True)
+            return None
+        if not isinstance(interaction.user, discord.Member) or not can_manage_custom_voice(interaction.user, channel):
+            await interaction.response.send_message("Réservé au propriétaire du salon, Orga PP ou admin.", ephemeral=True)
+            return None
+        return channel
+
+    @discord.ui.button(label="🔒 Lock", style=discord.ButtonStyle.secondary, custom_id="cvoice:lock")
+    async def lock_btn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        channel = await self._resolve(interaction)
+        if channel is None:
+            return
+        owner_id = db.get_custom_voice_owner(channel.id)
+        owner = interaction.guild.get_member(owner_id) if owner_id else interaction.user
+        await set_custom_voice_permissions(channel, owner=owner, locked=True)
+        await refresh_custom_voice_panel(channel)
+        await interaction.response.send_message("🔒 Salon verrouillé.", ephemeral=True)
+
+    @discord.ui.button(label="🔓 Unlock", style=discord.ButtonStyle.success, custom_id="cvoice:unlock")
+    async def unlock_btn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        channel = await self._resolve(interaction)
+        if channel is None:
+            return
+        owner_id = db.get_custom_voice_owner(channel.id)
+        owner = interaction.guild.get_member(owner_id) if owner_id else interaction.user
+        await set_custom_voice_permissions(channel, owner=owner, locked=False)
+        await refresh_custom_voice_panel(channel)
+        await interaction.response.send_message("🔓 Salon ouvert.", ephemeral=True)
+
+    @discord.ui.button(label="✏️ Rename", style=discord.ButtonStyle.primary, custom_id="cvoice:rename")
+    async def rename_btn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        channel = await self._resolve(interaction)
+        if channel is None:
+            return
+        await interaction.response.send_modal(CustomVoiceRenameModal(channel.id))
+
+    @discord.ui.button(label="👥 Slots", style=discord.ButtonStyle.primary, custom_id="cvoice:slots")
+    async def slots_btn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        channel = await self._resolve(interaction)
+        if channel is None:
+            return
+        await interaction.response.send_modal(CustomVoiceLimitModal(channel.id))
+
+    @discord.ui.button(label="⛔ Expulser", style=discord.ButtonStyle.danger, custom_id="cvoice:kick")
+    async def kick_btn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        channel = await self._resolve(interaction)
+        if channel is None:
+            return
+        eligible = [m for m in channel.members if not m.bot and m.id != interaction.user.id]
+        if not eligible:
+            return await interaction.response.send_message("Personne à expulser dans cette voc.", ephemeral=True)
+        await interaction.response.send_message("Choisis un membre à déconnecter :", view=CustomVoiceKickView(channel, interaction.user.id), ephemeral=True)
+
+
 # ===================== BOT =====================
 class PPBot(commands.Bot):
     def __init__(self):
@@ -1306,6 +1515,7 @@ class PPBot(commands.Bot):
     async def setup_hook(self) -> None:
         self.add_view(VerificationView())
         self.add_view(PPMatchView())
+        self.add_view(CustomVoiceControlView())
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -1360,14 +1570,35 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
             forget_member_from_prep(before.channel, member)
             if load_match_state(before.channel.id) is not None:
                 await refresh_match_message(member.guild, before.channel.id)
+        if is_custom_voice(before.channel) and (not after.channel or after.channel.id != before.channel.id):
+            await refresh_custom_voice_panel(before.channel)
         if not after.channel or after.channel.id != before.channel.id:
             await cleanup_custom_voice_if_empty(before.channel)
 
-    if isinstance(after.channel, discord.VoiceChannel) and is_prep_voice(after.channel):
-        if not before.channel or before.channel.id != after.channel.id:
+    if isinstance(after.channel, discord.VoiceChannel):
+        if is_create_voice_trigger(after.channel) and (not before.channel or before.channel.id != after.channel.id):
+            if not is_verified_member(member):
+                try:
+                    await member.move_to(None, reason="Verification required before creating custom voice")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                return
+            created = await create_custom_voice_channel(
+                member.guild,
+                member,
+                f"🎤 Salon de {member.display_name}",
+                CUSTOM_VOICE_DEFAULT_LIMIT,
+            )
+            await ensure_custom_voice_panel(created)
+            return
+
+        if is_prep_voice(after.channel) and (not before.channel or before.channel.id != after.channel.id):
             remember_member_in_prep(after.channel, member)
             if load_match_state(after.channel.id) is not None:
                 await refresh_match_message(member.guild, after.channel.id)
+        if is_custom_voice(after.channel) and (not before.channel or before.channel.id != after.channel.id):
+            await ensure_custom_voice_panel(after.channel)
+            await refresh_custom_voice_panel(after.channel)
 
 
 # ===================== COMMANDS =====================
@@ -1409,7 +1640,7 @@ async def setup_pp(interaction: discord.Interaction) -> None:
             )
             await verify_channel.send(embed=embed, view=VerificationView(guild))
 
-    text = "✅ Setup terminé.\n"
+    text = "✅ Setup terminé.\n• Rejoins **Créer un salon** pour générer une voc privée avec panneau de boutons.\n"
     if missing:
         text += "⚠️ Salons introuvables : " + ", ".join(missing)
     else:
@@ -1462,81 +1693,6 @@ async def pp_cleanup(interaction: discord.Interaction) -> None:
     await interaction.response.send_message("✅ Partie active nettoyée.", ephemeral=True)
 
 
-@bot.tree.command(name="voc_create", description="Crée un vocal privé gérable dans la Taverne.")
-@app_commands.guild_only()
-@app_commands.describe(nom="Nom du salon vocal", slots="Nombre max de places (0 = illimité)")
-async def voc_create(interaction: discord.Interaction, nom: str, slots: Optional[int] = CUSTOM_VOICE_DEFAULT_LIMIT) -> None:
-    if not isinstance(interaction.user, discord.Member):
-        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
-    if not is_verified_member(interaction.user):
-        return await interaction.response.send_message("Tu dois être vérifié pour créer un vocal.", ephemeral=True)
-    if len(nom.strip()) < 2:
-        return await interaction.response.send_message("Donne un nom un peu plus long pour le vocal.", ephemeral=True)
-    channel = await create_custom_voice_channel(interaction.guild, interaction.user, nom.strip(), slots or 0)
-    await interaction.response.send_message(
-        f"✅ Vocal créé : {channel.mention}\nTu peux le **renommer**, **modifier la limite**, **expulser** des gens et le **verrouiller** avec les commandes dédiées.",
-        ephemeral=True,
-    )
-
-
-@bot.tree.command(name="voc_lock", description="Verrouille ou déverrouille ton vocal privé.")
-@app_commands.guild_only()
-@app_commands.describe(verrouille="true pour verrouiller, false pour ouvrir")
-async def voc_lock(interaction: discord.Interaction, verrouille: bool) -> None:
-    if not isinstance(interaction.user, discord.Member):
-        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
-    channel = interaction.user.voice.channel if interaction.user.voice else None
-    if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
-        return await interaction.response.send_message("Connecte-toi dans le vocal privé que tu gères.", ephemeral=True)
-    owner = channel.guild.get_member(db.get_custom_voice_owner(channel.id)) or interaction.user
-    await set_custom_voice_permissions(channel, owner=owner, locked=verrouille)
-    await interaction.response.send_message("🔒 Vocal verrouillé." if verrouille else "🔓 Vocal ouvert.", ephemeral=True)
-
-
-@bot.tree.command(name="voc_limit", description="Change la limite de places de ton vocal privé.")
-@app_commands.guild_only()
-@app_commands.describe(slots="0 = illimité, sinon entre 1 et 99")
-async def voc_limit(interaction: discord.Interaction, slots: app_commands.Range[int, 0, 99]) -> None:
-    if not isinstance(interaction.user, discord.Member):
-        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
-    channel = interaction.user.voice.channel if interaction.user.voice else None
-    if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
-        return await interaction.response.send_message("Connecte-toi dans le vocal privé que tu gères.", ephemeral=True)
-    await channel.edit(user_limit=int(slots), reason="Custom voice limit change")
-    await interaction.response.send_message(f"👥 Limite mise à **{slots}**.", ephemeral=True)
-
-
-@bot.tree.command(name="voc_rename", description="Renomme ton vocal privé.")
-@app_commands.guild_only()
-@app_commands.describe(nom="Nouveau nom du vocal")
-async def voc_rename(interaction: discord.Interaction, nom: str) -> None:
-    if not isinstance(interaction.user, discord.Member):
-        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
-    channel = interaction.user.voice.channel if interaction.user.voice else None
-    if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
-        return await interaction.response.send_message("Connecte-toi dans le vocal privé que tu gères.", ephemeral=True)
-    await channel.edit(name=nom.strip(), reason="Custom voice rename")
-    await interaction.response.send_message(f"✏️ Vocal renommé en **{nom.strip()}**.", ephemeral=True)
-
-
-@bot.tree.command(name="voc_kick", description="Déconnecte quelqu'un de ton vocal privé.")
-@app_commands.guild_only()
-@app_commands.describe(membre="Membre à déconnecter")
-async def voc_kick(interaction: discord.Interaction, membre: discord.Member) -> None:
-    if not isinstance(interaction.user, discord.Member):
-        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
-    channel = interaction.user.voice.channel if interaction.user.voice else None
-    if not isinstance(channel, discord.VoiceChannel) or not can_manage_custom_voice(interaction.user, channel):
-        return await interaction.response.send_message("Connecte-toi dans le vocal privé que tu gères.", ephemeral=True)
-    if membre.bot or not membre.voice or membre.voice.channel.id != channel.id:
-        return await interaction.response.send_message("Ce membre n'est pas dans ton vocal.", ephemeral=True)
-    if membre.id == interaction.user.id:
-        return await interaction.response.send_message("Tu ne peux pas te déconnecter toi-même avec cette commande.", ephemeral=True)
-    try:
-        await membre.move_to(None, reason=f"Disconnected from private voice by {interaction.user}")
-    except (discord.Forbidden, discord.HTTPException):
-        return await interaction.response.send_message("Impossible de déconnecter ce membre.", ephemeral=True)
-    await interaction.response.send_message(f"⛔ {membre.mention} a été déconnecté de **{channel.name}**.", ephemeral=True)
 
 
 # ===================== RENDER WEB HEALTH SERVER =====================
