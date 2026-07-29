@@ -25,6 +25,15 @@ TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 DB_PATH = os.getenv("PP_DB_PATH", "pp_bot.sqlite3")
 
+# GESTION DES IDs (Recommandé pour pouvoir renommer sans casser le bot)
+VERIFY_CHANNEL_ID = os.getenv("VERIFY_CHANNEL_ID")
+WELCOME_CHANNEL_ID = os.getenv("WELCOME_CHANNEL_ID")
+ORGA_TEXT_CHANNEL_ID = os.getenv("ORGA_TEXT_CHANNEL_ID")
+CREATE_VOICE_TRIGGER_ID = os.getenv("CREATE_VOICE_TRIGGER_ID")
+HOME_CATEGORY_ID = os.getenv("HOME_CATEGORY_ID")
+TAVERN_CATEGORY_ID = os.getenv("TAVERN_CATEGORY_ID")
+PARTY_CATEGORY_ID = os.getenv("PARTY_CATEGORY_ID")
+
 VERIFY_CHANNEL_NAME = os.getenv("VERIFY_CHANNEL_NAME", "verification")
 PREP_CHANNEL_NAMES = [
     name.strip()
@@ -98,7 +107,6 @@ INTENTS.voice_states = True
 INTENTS.messages = True
 INTENTS.message_content = False
 
-# 25 options max sur un menu déroulant Discord. (Radiant inclus ici pour le code, filtré dans l'UI)
 RANK_OPTIONS: List[Tuple[str, int]] = [
     ("Fer 1", 100), ("Fer 2", 110), ("Fer 3", 120),
     ("Bronze 1", 200), ("Bronze 2", 210), ("Bronze 3", 220),
@@ -171,12 +179,10 @@ MAP_IMAGE: Dict[str, str] = {
 JOIN_SEQUENCE = 0
 PREP_JOIN_ORDER: Dict[int, Dict[int, int]] = {}
 
-
 def next_join_sequence() -> int:
     global JOIN_SEQUENCE
     JOIN_SEQUENCE += 1
     return JOIN_SEQUENCE
-
 
 def slug(text: str) -> str:
     text = unicodedata.normalize("NFKD", text)
@@ -184,7 +190,6 @@ def slug(text: str) -> str:
     for sep in ["・", "|", "—", "-", "•", "·", "_", "/"]:
         text = text.replace(sep, " ")
     return " ".join(text.lower().split())
-
 
 # ===================== DATABASE =====================
 class Database:
@@ -241,7 +246,6 @@ class Database:
             )
             """
         )
-
         self.conn.commit()
 
     def upsert_player_rank(self, user_id: int, rank_name: str) -> None:
@@ -397,14 +401,20 @@ def is_prep_voice(channel: Optional[discord.abc.GuildChannel]) -> bool:
     return isinstance(channel, discord.VoiceChannel) and slug(channel.name) in {slug(n) for n in PREP_CHANNEL_NAMES}
 
 
-def find_category(guild: discord.Guild, name: str) -> Optional[discord.CategoryChannel]:
+def find_category(guild: discord.Guild, category_id_str: Optional[str], name: str) -> Optional[discord.CategoryChannel]:
+    if category_id_str and category_id_str.isdigit():
+        c = guild.get_channel(int(category_id_str))
+        if isinstance(c, discord.CategoryChannel): return c
     return discord.utils.find(
         lambda c: isinstance(c, discord.CategoryChannel) and slug(c.name) == slug(name),
         guild.categories,
     )
 
 
-def find_text_channel(guild: discord.Guild, aliases: List[str], *, category: Optional[discord.CategoryChannel] = None) -> Optional[discord.TextChannel]:
+def find_text_channel(guild: discord.Guild, channel_id_str: Optional[str], aliases: List[str], *, category: Optional[discord.CategoryChannel] = None) -> Optional[discord.TextChannel]:
+    if channel_id_str and channel_id_str.isdigit():
+        c = guild.get_channel(int(channel_id_str))
+        if isinstance(c, discord.TextChannel): return c
     wanted = {slug(name) for name in aliases if name}
     channels = category.text_channels if category is not None else guild.text_channels
     return discord.utils.find(
@@ -415,13 +425,13 @@ def find_text_channel(guild: discord.Guild, aliases: List[str], *, category: Opt
 
 def get_verify_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
     aliases = [VERIFY_CHANNEL_NAME, *VERIFY_CHANNEL_ALIASES]
-    return find_text_channel(guild, aliases)
+    return find_text_channel(guild, VERIFY_CHANNEL_ID, aliases)
 
 
 def get_welcome_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
-    home_category = find_category(guild, HOME_CATEGORY_NAME)
+    home_category = find_category(guild, HOME_CATEGORY_ID, HOME_CATEGORY_NAME)
     aliases = [WELCOME_CHANNEL_NAME, "bienvenue", "welcome"]
-    return find_text_channel(guild, aliases, category=home_category) or find_text_channel(guild, aliases)
+    return find_text_channel(guild, WELCOME_CHANNEL_ID, aliases, category=home_category) or find_text_channel(guild, WELCOME_CHANNEL_ID, aliases)
 
 
 def is_admin(member: discord.Member) -> bool:
@@ -441,7 +451,9 @@ def is_custom_voice(channel: Optional[discord.abc.GuildChannel]) -> bool:
 
 
 def is_create_voice_trigger(channel: Optional[discord.abc.GuildChannel]) -> bool:
-    return isinstance(channel, discord.VoiceChannel) and slug(channel.name) in {slug(n) for n in CREATE_VOICE_TRIGGER_ALIASES}
+    if not isinstance(channel, discord.VoiceChannel): return False
+    if CREATE_VOICE_TRIGGER_ID and str(channel.id) == str(CREATE_VOICE_TRIGGER_ID): return True
+    return slug(channel.name) in {slug(n) for n in CREATE_VOICE_TRIGGER_ALIASES}
 
 
 def custom_voice_locked(channel: discord.VoiceChannel) -> bool:
@@ -470,19 +482,17 @@ async def ensure_core_roles(guild: discord.Guild) -> Dict[str, discord.Role]:
     player_role = await ensure_role(guild, PLAYER_ROLE)
     roles = {
         "non_verified": await ensure_role(guild, NON_VERIFIED_ROLE),
-        "member": player_role,  # rôle d'accès vérifié = Joueur
+        "member": player_role,
         "orga": await ensure_role(guild, ORGA_ROLE),
         "attack": await ensure_role(guild, TEAM_ATTACK_ROLE),
         "defense": await ensure_role(guild, TEAM_DEFENSE_ROLE),
         "player": player_role,
     }
-    # rôle legacy éventuel ; on le laisse exister si déjà utilisé ailleurs
     if MEMBER_ROLE != PLAYER_ROLE:
         await ensure_role(guild, MEMBER_ROLE)
     for rank_name, _ in RANK_OPTIONS:
         await ensure_role(guild, rank_name)
     return roles
-
 
 async def sync_existing_membership_roles(guild: discord.Guild) -> None:
     roles = await ensure_core_roles(guild)
@@ -500,7 +510,6 @@ async def sync_existing_membership_roles(guild: discord.Guild) -> None:
             await member.add_roles(verified_role, reason="PP setup membership sync")
         except discord.Forbidden:
             pass
-
 
 async def _safe_set_permissions(channel: discord.abc.GuildChannel, target: discord.abc.Snowflake, **kwargs) -> None:
     try:
@@ -593,17 +602,17 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
     member = roles["member"]
     orga = roles["orga"]
 
-    verify_channel = get_verify_channel(guild)
-    home_category = find_category(guild, HOME_CATEGORY_NAME)
-    tavern_category = find_category(guild, TAVERN_CATEGORY_NAME)
-    party_category = find_category(guild, PARTY_CATEGORY_NAME)
-    orga_channel = find_text_channel(guild, [ORGA_TEXT_CHANNEL_NAME, "orga pp"], category=party_category)
-    read_only_names = {slug(name) for name in READ_ONLY_TEXT_CHANNEL_NAMES}
+    # Au lieu d'écraser tous les salons, le bot met à jour le rôle global Non-Vérifié pour empêcher l'accès au serveur.
+    try:
+        perms = non_verified.permissions
+        perms.update(read_messages=False, send_messages=False, connect=False)
+        await non_verified.edit(permissions=perms, reason="PP Setup: Default block for non verified")
+    except discord.Forbidden:
+        pass
 
-    for channel in guild.channels:
-        if channel == verify_channel:
-            continue
-        await _safe_set_permissions(channel, non_verified, view_channel=False, connect=False, send_messages=False)
+    verify_channel = get_verify_channel(guild)
+    party_category = find_category(guild, PARTY_CATEGORY_ID, PARTY_CATEGORY_NAME)
+    orga_channel = find_text_channel(guild, ORGA_TEXT_CHANNEL_ID, [ORGA_TEXT_CHANNEL_NAME, "orga pp"], category=party_category)
 
     if verify_channel is not None:
         await _safe_set_permissions(verify_channel, default_role, view_channel=False, send_messages=False, add_reactions=False)
@@ -628,58 +637,31 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
             manage_messages=True,
         )
 
-    categories = [cat for cat in [home_category, tavern_category, party_category] if cat is not None]
-    for category in categories:
-        for text_channel in category.text_channels:
-            if verify_channel is not None and text_channel.id == verify_channel.id:
-                continue
-            if orga_channel is not None and text_channel.id == orga_channel.id:
-                await _configure_text_channel(
-                    text_channel,
-                    default_role=default_role,
-                    non_verified=non_verified,
-                    member=member,
-                    orga=orga,
-                    member_can_write=False,
-                    visible_to_member=False,
-                    visible_to_orga=True,
-                )
-                continue
-            member_can_write = slug(text_channel.name) not in read_only_names
-            await _configure_text_channel(
-                text_channel,
-                default_role=default_role,
-                non_verified=non_verified,
-                member=member,
-                orga=orga,
-                member_can_write=member_can_write,
-                visible_to_member=True,
-                visible_to_orga=True,
-            )
-
-        for voice_channel in category.voice_channels:
-            await _configure_voice_channel(
-                voice_channel,
-                default_role=default_role,
-                non_verified=non_verified,
-                member=member,
-                orga=orga,
-            )
+    if orga_channel is not None:
+        await _configure_text_channel(
+            orga_channel,
+            default_role=default_role,
+            non_verified=non_verified,
+            member=member,
+            orga=orga,
+            member_can_write=False,
+            visible_to_member=False,
+            visible_to_orga=True,
+        )
 
     for channel_name in PREP_CHANNEL_NAMES:
         prep = discord.utils.find(
             lambda c: isinstance(c, discord.VoiceChannel) and slug(c.name) == slug(channel_name),
             guild.channels,
         )
-        if prep is None:
-            continue
-        await _configure_voice_channel(
-            prep,
-            default_role=default_role,
-            non_verified=non_verified,
-            member=member,
-            orga=orga,
-        )
+        if prep is not None:
+            await _configure_voice_channel(
+                prep,
+                default_role=default_role,
+                non_verified=non_verified,
+                member=member,
+                orga=orga,
+            )
 
 
 async def set_custom_voice_permissions(channel: discord.VoiceChannel, *, owner: discord.Member, locked: bool = False) -> None:
@@ -736,7 +718,7 @@ async def set_custom_voice_permissions(channel: discord.VoiceChannel, *, owner: 
 async def create_custom_voice_channel(guild: discord.Guild, owner: discord.Member, name: str, user_limit: int = 0) -> discord.VoiceChannel:
     category = guild.get_channel(CUSTOM_VOICE_CATEGORY_ID)
     if not isinstance(category, discord.CategoryChannel):
-        category = find_category(guild, CUSTOM_VOICE_CATEGORY_NAME) or find_category(guild, TAVERN_CATEGORY_NAME)
+        category = find_category(guild, None, CUSTOM_VOICE_CATEGORY_NAME) or find_category(guild, TAVERN_CATEGORY_ID, TAVERN_CATEGORY_NAME)
     channel = await guild.create_voice_channel(name=name, category=category, user_limit=max(0, min(99, user_limit)))
     db.register_custom_voice(channel.id, owner.id)
     await set_custom_voice_permissions(channel, owner=owner, locked=False)
@@ -892,8 +874,6 @@ def ordered_prep_members(channel: discord.VoiceChannel) -> List[discord.Member]:
 
 def _effective_player_skill(member: discord.Member) -> float:
     raw = float(max(1, rank_value_for_member(member)))
-    # Transformation non linéaire : on garde l'ordre des ranks mais on accentue légèrement
-    # l'impact des très hauts ranks sans exploser les écarts.
     return (raw ** 1.12) + (22.0 * math.log1p(raw)) + (8.0 * math.sqrt(raw))
 
 
@@ -910,7 +890,6 @@ def _team_balance_cost(team_a: List[discord.Member], team_b: List[discord.Member
     bot2_a, bot2_b = sum(skills_a[-2:]), sum(skills_b[-2:])
     median_a, median_b = statistics.median(skills_a), statistics.median(skills_b)
 
-    # Fonction de coût multicritère.
     return (
         abs(sum_a - sum_b)
         + 0.65 * abs(mean_a - mean_b)
@@ -1122,7 +1101,6 @@ async def refresh_match_message(guild: discord.Guild, prep_channel_id: int) -> N
 # ===================== UI: VERIFICATION =====================
 class RankSelect(discord.ui.Select):
     def __init__(self, guild: Optional[discord.Guild] = None):
-        # On exclut "Radiant" uniquement des options du menu déroulant
         options = [
             discord.SelectOption(
                 label=name,
