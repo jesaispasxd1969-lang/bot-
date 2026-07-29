@@ -1544,7 +1544,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 f"🎤 Salon de {member.display_name}",
                 CUSTOM_VOICE_DEFAULT_LIMIT,
             )
-            await ensure_custom_voice_panel(created)
+            # LA LIGNE A ÉTÉ SUPPRIMÉE ICI POUR ÉVITER LE DOUBLON
             return
 
         if is_prep_voice(after.channel) and (not before.channel or before.channel.id != after.channel.id):
@@ -1554,7 +1554,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         if is_custom_voice(after.channel) and (not before.channel or before.channel.id != after.channel.id):
             await ensure_custom_voice_panel(after.channel)
             await refresh_custom_voice_panel(after.channel)
-
 
 # ===================== COMMANDS =====================
 @bot.tree.command(name="setup_pp", description="Configure les rôles, permissions et panneaux PP sur les salons de la catégorie PP.")
