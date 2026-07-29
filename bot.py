@@ -70,7 +70,7 @@ MEMBER_ROLE = os.getenv("MEMBER_ROLE", "Membre")
 ORGA_ROLE = os.getenv("ORGA_ROLE", "Orga PP")
 TEAM_ATTACK_ROLE = os.getenv("TEAM_ATTACK_ROLE", "Équipe Attaque")
 TEAM_DEFENSE_ROLE = os.getenv("TEAM_DEFENSE_ROLE", "Équipe Défense")
-PLAYER_ROLE = os.getenv("PLAYER_ROLE", "Joueur")
+PLAYER_ROLE = os.getenv("PLAYER_ROLE", "🌸・Pèlerin")
 
 VALORANT_MAPS = [
     "Ascent",
