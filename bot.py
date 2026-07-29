@@ -152,18 +152,18 @@ RANK_TIER_EMOJI = {
 }
 
 MAP_IMAGE: Dict[str, str] = {
-    "Haven":    "https://c-valorant-api.op.gg/Assets/Maps/2BEE0DC9-4FFE-519B-1CBD-7FBE763A6047_splash.png",
-    "Corrode":  "https://c-valorant-api.op.gg/Assets/Maps/1C18AB1F-420D-0D8B-71D0-77AD3C439115_splash.png",
-    "Icebox":   "https://c-valorant-api.op.gg/Assets/Maps/E2AD5C54-4114-A870-9641-8EA21279579A_splash.png",
-    "Pearl":    "https://c-valorant-api.op.gg/Assets/Maps/FD267378-4D1D-484F-FF52-77821ED10DC2_splash.png",
-    "Sunset":   "https://c-valorant-api.op.gg/Assets/Maps/92584FBE-486A-B1B2-9FAA-39B0F486B498_splash.png",
-    "Lotus":    "https://c-valorant-api.op.gg/Assets/Maps/2FE4ED3A-450A-948B-6D6B-E89A78E680A9_splash.png",
-    "Abyss":    "https://c-valorant-api.op.gg/Assets/Maps/224B0A95-48B9-F703-1BD8-67ACA101A61F_splash.png",
-    "Breeze":   "https://c-valorant-api.op.gg/Assets/Maps/2FB9A4FD-47B8-4E7D-A969-74B4046EBD53_splash.png",
-    "Ascent":   "https://c-valorant-api.op.gg/Assets/Maps/7EAECC1B-4337-BBF6-6AB9-04B8F06B3319_splash.png",
-    "Split":    "https://c-valorant-api.op.gg/Assets/Maps/D960549E-485C-E861-8D71-AA9D1AED12A2_splash.png",
-    "Fracture": "https://c-valorant-api.op.gg/Assets/Maps/B529448B-4D60-346E-E89E-00A4C527A405_splash.png",
-    "Bind":     "https://c-valorant-api.op.gg/Assets/Maps/2C9D57EC-4431-9C5E-2939-8F9EF6DD5CBA_splash.png",
+    "Haven":    "https://media.valorant-api.com/maps/2bee0dc9-4ffe-519b-1cbd-7fbe763a6047/splash.png",
+    "Corrode":  "https://media.valorant-api.com/maps/1c18ab1f-420d-0d8b-71d0-77ad3c439115/splash.png",
+    "Icebox":   "https://media.valorant-api.com/maps/e2ad5c54-4114-a870-9641-8ea21279579a/splash.png",
+    "Pearl":    "https://media.valorant-api.com/maps/fd267378-4d1d-484f-ff52-77821ed10dc2/splash.png",
+    "Sunset":   "https://media.valorant-api.com/maps/92584fbe-486a-b1b2-9faa-39b0f486b498/splash.png",
+    "Lotus":    "https://media.valorant-api.com/maps/2fe4ed3a-450a-948b-6d6b-e89a78e680a9/splash.png",
+    "Abyss":    "https://media.valorant-api.com/maps/224b0a95-48b9-f703-1bd8-67aca101a61f/splash.png",
+    "Breeze":   "https://media.valorant-api.com/maps/2fb9a4fd-47b8-4e7d-a969-74b4046ebd53/splash.png",
+    "Ascent":   "https://media.valorant-api.com/maps/7eaecc1b-4337-bbf6-6ab9-04b8f06b3319/splash.png",
+    "Split":    "https://media.valorant-api.com/maps/d960549e-485c-e861-8d71-aa9d1aed12a2/splash.png",
+    "Fracture": "https://media.valorant-api.com/maps/b529448b-4d60-346e-e89e-00a4c527a405/splash.png",
+    "Bind":     "https://media.valorant-api.com/maps/2c9d57ec-4431-9c5e-2939-8f9ef6dd5cba/splash.png",
     "Summit":   "https://media.valorant-api.com/maps/10b2df76-47b2-4d29-b690-3fb1c13cb21d/splash.png",
 }
 
@@ -587,7 +587,6 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
     member = roles["member"]
     orga = roles["orga"]
 
-    # Au lieu d'écraser tous les salons, le bot met à jour le rôle global Non-Vérifié pour empêcher l'accès au serveur par défaut.
     try:
         perms = non_verified.permissions
         perms.update(read_messages=False, send_messages=False, connect=False)
