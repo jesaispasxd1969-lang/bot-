@@ -98,7 +98,7 @@ INTENTS.voice_states = True
 INTENTS.messages = True
 INTENTS.message_content = False
 
-# 25 options max sur un menu déroulant Discord.
+# 25 options max sur un menu déroulant Discord. (Radiant inclus ici pour le code, filtré dans l'UI)
 RANK_OPTIONS: List[Tuple[str, int]] = [
     ("Fer 1", 100), ("Fer 2", 110), ("Fer 3", 120),
     ("Bronze 1", 200), ("Bronze 2", 210), ("Bronze 3", 220),
@@ -483,6 +483,7 @@ async def ensure_core_roles(guild: discord.Guild) -> Dict[str, discord.Role]:
         await ensure_role(guild, rank_name)
     return roles
 
+
 async def sync_existing_membership_roles(guild: discord.Guild) -> None:
     roles = await ensure_core_roles(guild)
     verified_role = roles["player"]
@@ -499,7 +500,6 @@ async def sync_existing_membership_roles(guild: discord.Guild) -> None:
             await member.add_roles(verified_role, reason="PP setup membership sync")
         except discord.Forbidden:
             pass
-
 
 
 async def _safe_set_permissions(channel: discord.abc.GuildChannel, target: discord.abc.Snowflake, **kwargs) -> None:
@@ -911,12 +911,6 @@ def _team_balance_cost(team_a: List[discord.Member], team_b: List[discord.Member
     median_a, median_b = statistics.median(skills_a), statistics.median(skills_b)
 
     # Fonction de coût multicritère.
-    # 1) écart total de puissance
-    # 2) écart de moyenne
-    # 3) écart de dispersion pour éviter une équipe très polarisée
-    # 4) écart sur les 2 plus gros ranks pour éviter un empilement de gros niveaux
-    # 5) écart sur les 2 plus faibles pour éviter qu'une équipe ait tout le "bas du lobby"
-    # 6) écart de médiane comme stabilisateur
     return (
         abs(sum_a - sum_b)
         + 0.65 * abs(mean_a - mean_b)
@@ -928,8 +922,6 @@ def _team_balance_cost(team_a: List[discord.Member], team_b: List[discord.Member
 
 
 def split_balanced_teams(members: List[discord.Member]) -> Tuple[List[discord.Member], List[discord.Member]]:
-    # On optimise exhaustivement toutes les répartitions 5v5 parmi les 10 joueurs retenus.
-    # 10 choose 5 = 252 combinaisons : c'est très léger mais bien plus précis qu'un glouton simple.
     if len(members) != 10:
         scored = sorted(members, key=rank_value_for_member, reverse=True)
         midpoint = len(scored) // 2
@@ -949,7 +941,6 @@ def split_balanced_teams(members: List[discord.Member]) -> Tuple[List[discord.Me
         cost = _team_balance_cost(attack, defense)
         raw_gap = abs(sum(rank_value_for_member(m) for m in attack) - sum(rank_value_for_member(m) for m in defense))
 
-        # Tiebreakers : coût global, puis écart brut de ranks, puis ordre lexicographique stable.
         if cost < best_cost - 1e-9 or (abs(cost - best_cost) <= 1e-9 and raw_gap < best_raw_gap):
             best_cost = cost
             best_raw_gap = raw_gap
@@ -1131,6 +1122,7 @@ async def refresh_match_message(guild: discord.Guild, prep_channel_id: int) -> N
 # ===================== UI: VERIFICATION =====================
 class RankSelect(discord.ui.Select):
     def __init__(self, guild: Optional[discord.Guild] = None):
+        # On exclut "Radiant" uniquement des options du menu déroulant
         options = [
             discord.SelectOption(
                 label=name,
@@ -1138,7 +1130,7 @@ class RankSelect(discord.ui.Select):
                 emoji=rank_select_emoji(guild, name),
                 description=f"Attribue le rôle {name}",
             )
-            for name, _ in RANK_OPTIONS
+            for name, _ in RANK_OPTIONS if name != "Radiant"
         ]
         super().__init__(
             placeholder="Choisis ton rank Valorant",
@@ -1534,7 +1526,6 @@ bot = PPBot()
 @bot.event
 async def on_ready() -> None:
     await seed_existing_prep_members(bot.guilds)
-    refresh_map_image_cache()
     print(f"[OK] Connecté en tant que {bot.user} ({bot.user.id})")
 
 
@@ -1694,8 +1685,6 @@ async def pp_cleanup(interaction: discord.Interaction) -> None:
     await clear_team_roles(interaction.guild, members)
     db.delete_active_match(prep_channel.id)
     await interaction.response.send_message("✅ Partie active nettoyée.", ephemeral=True)
-
-
 
 
 # ===================== RENDER WEB HEALTH SERVER =====================
