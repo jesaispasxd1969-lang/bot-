@@ -25,15 +25,6 @@ TOKEN = os.getenv("DISCORD_BOT_TOKEN")
 GUILD_ID = os.getenv("DISCORD_GUILD_ID")
 DB_PATH = os.getenv("PP_DB_PATH", "pp_bot.sqlite3")
 
-# GESTION DES IDs (Recommandé pour pouvoir renommer sans casser le bot)
-VERIFY_CHANNEL_ID = os.getenv("VERIFY_CHANNEL_ID")
-WELCOME_CHANNEL_ID = os.getenv("WELCOME_CHANNEL_ID")
-ORGA_TEXT_CHANNEL_ID = os.getenv("ORGA_TEXT_CHANNEL_ID")
-CREATE_VOICE_TRIGGER_ID = os.getenv("CREATE_VOICE_TRIGGER_ID")
-HOME_CATEGORY_ID = os.getenv("HOME_CATEGORY_ID")
-TAVERN_CATEGORY_ID = os.getenv("TAVERN_CATEGORY_ID")
-PARTY_CATEGORY_ID = os.getenv("PARTY_CATEGORY_ID")
-
 VERIFY_CHANNEL_NAME = os.getenv("VERIFY_CHANNEL_NAME", "verification")
 PREP_CHANNEL_NAMES = [
     name.strip()
@@ -52,14 +43,18 @@ VERIFY_CHANNEL_ALIASES = [
     ).split(",")
     if name.strip()
 ]
+
+# Catégories optionnelles (si elles ne sont pas trouvées, le bot n'y touchera pas)
 HOME_CATEGORY_NAME = os.getenv("HOME_CATEGORY_NAME", "KAER MORHEN")
 TAVERN_CATEGORY_NAME = os.getenv("TAVERN_CATEGORY_NAME", "TAVERNE")
 PARTY_CATEGORY_NAME = os.getenv("PARTY_CATEGORY_NAME", "PARTIE PERSO")
 ORGA_TEXT_CHANNEL_NAME = os.getenv("ORGA_TEXT_CHANNEL_NAME", "orga-pp")
 WELCOME_CHANNEL_NAME = os.getenv("WELCOME_CHANNEL_NAME", "bienvenue")
+
 CUSTOM_VOICE_CATEGORY_ID = int(os.getenv("CUSTOM_VOICE_CATEGORY_ID", "1460123537560965224"))
 CUSTOM_VOICE_CATEGORY_NAME = os.getenv("CUSTOM_VOICE_CATEGORY_NAME", TAVERN_CATEGORY_NAME)
 CUSTOM_VOICE_DEFAULT_LIMIT = int(os.getenv("CUSTOM_VOICE_DEFAULT_LIMIT", "0"))
+
 CREATE_VOICE_TRIGGER_NAME = os.getenv("CREATE_VOICE_TRIGGER_NAME", "Créer un salon")
 CREATE_VOICE_TRIGGER_ALIASES = [
     name.strip()
@@ -67,11 +62,6 @@ CREATE_VOICE_TRIGGER_ALIASES = [
         "CREATE_VOICE_TRIGGER_ALIASES",
         f"{CREATE_VOICE_TRIGGER_NAME},creer un salon,+ creer un salon,+ créer un salon",
     ).split(",")
-    if name.strip()
-]
-READ_ONLY_TEXT_CHANNEL_NAMES = [
-    name.strip()
-    for name in os.getenv("READ_ONLY_TEXT_CHANNEL_NAMES", "règlement,annonces").split(",")
     if name.strip()
 ]
 
@@ -95,6 +85,7 @@ VALORANT_MAPS = [
     "Fracture",
     "Abyss",
     "Corrode",
+    "Summit",
 ]
 
 VOTE_THRESHOLD_ACCEPT = 5
@@ -161,18 +152,19 @@ RANK_TIER_EMOJI = {
 }
 
 MAP_IMAGE: Dict[str, str] = {
-    "Haven":    "https://c-valorant-api.op.gg/Assets/Maps/2BEE0DC9-4FFE-519B-1CBD-7FBE763A6047_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Corrode":  "https://c-valorant-api.op.gg/Assets/Maps/1C18AB1F-420D-0D8B-71D0-77AD3C439115_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Icebox":   "https://c-valorant-api.op.gg/Assets/Maps/E2AD5C54-4114-A870-9641-8EA21279579A_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Pearl":    "https://c-valorant-api.op.gg/Assets/Maps/FD267378-4D1D-484F-FF52-77821ED10DC2_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Sunset":   "https://c-valorant-api.op.gg/Assets/Maps/92584FBE-486A-B1B2-9FAA-39B0F486B498_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Lotus":    "https://c-valorant-api.op.gg/Assets/Maps/2FE4ED3A-450A-948B-6D6B-E89A78E680A9_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Abyss":    "https://c-valorant-api.op.gg/Assets/Maps/224B0A95-48B9-F703-1BD8-67ACA101A61F_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Breeze":   "https://c-valorant-api.op.gg/Assets/Maps/2FB9A4FD-47B8-4E7D-A969-74B4046EBD53_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Ascent":   "https://c-valorant-api.op.gg/Assets/Maps/7EAECC1B-4337-BBF6-6AB9-04B8F06B3319_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Split":    "https://c-valorant-api.op.gg/Assets/Maps/D960549E-485C-E861-8D71-AA9D1AED12A2_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Fracture": "https://c-valorant-api.op.gg/Assets/Maps/B529448B-4D60-346E-E89E-00A4C527A405_splash.png?image=q_auto:good,f_webp&v=1760610922",
-    "Bind":     "https://c-valorant-api.op.gg/Assets/Maps/2C9D57EC-4431-9C5E-2939-8F9EF6DD5CBA_splash.png?image=q_auto:good,f_webp&v=1760610922",
+    "Haven":    "https://c-valorant-api.op.gg/Assets/Maps/2BEE0DC9-4FFE-519B-1CBD-7FBE763A6047_splash.png",
+    "Corrode":  "https://c-valorant-api.op.gg/Assets/Maps/1C18AB1F-420D-0D8B-71D0-77AD3C439115_splash.png",
+    "Icebox":   "https://c-valorant-api.op.gg/Assets/Maps/E2AD5C54-4114-A870-9641-8EA21279579A_splash.png",
+    "Pearl":    "https://c-valorant-api.op.gg/Assets/Maps/FD267378-4D1D-484F-FF52-77821ED10DC2_splash.png",
+    "Sunset":   "https://c-valorant-api.op.gg/Assets/Maps/92584FBE-486A-B1B2-9FAA-39B0F486B498_splash.png",
+    "Lotus":    "https://c-valorant-api.op.gg/Assets/Maps/2FE4ED3A-450A-948B-6D6B-E89A78E680A9_splash.png",
+    "Abyss":    "https://c-valorant-api.op.gg/Assets/Maps/224B0A95-48B9-F703-1BD8-67ACA101A61F_splash.png",
+    "Breeze":   "https://c-valorant-api.op.gg/Assets/Maps/2FB9A4FD-47B8-4E7D-A969-74B4046EBD53_splash.png",
+    "Ascent":   "https://c-valorant-api.op.gg/Assets/Maps/7EAECC1B-4337-BBF6-6AB9-04B8F06B3319_splash.png",
+    "Split":    "https://c-valorant-api.op.gg/Assets/Maps/D960549E-485C-E861-8D71-AA9D1AED12A2_splash.png",
+    "Fracture": "https://c-valorant-api.op.gg/Assets/Maps/B529448B-4D60-346E-E89E-00A4C527A405_splash.png",
+    "Bind":     "https://c-valorant-api.op.gg/Assets/Maps/2C9D57EC-4431-9C5E-2939-8F9EF6DD5CBA_splash.png",
+    "Summit":   "https://media.valorant-api.com/maps/10b2df76-47b2-4d29-b690-3fb1c13cb21d/splash.png",
 }
 
 # Ordre d'arrivée dans chaque vocal Préparation.
@@ -401,20 +393,14 @@ def is_prep_voice(channel: Optional[discord.abc.GuildChannel]) -> bool:
     return isinstance(channel, discord.VoiceChannel) and slug(channel.name) in {slug(n) for n in PREP_CHANNEL_NAMES}
 
 
-def find_category(guild: discord.Guild, category_id_str: Optional[str], name: str) -> Optional[discord.CategoryChannel]:
-    if category_id_str and category_id_str.isdigit():
-        c = guild.get_channel(int(category_id_str))
-        if isinstance(c, discord.CategoryChannel): return c
+def find_category(guild: discord.Guild, name: str) -> Optional[discord.CategoryChannel]:
     return discord.utils.find(
         lambda c: isinstance(c, discord.CategoryChannel) and slug(c.name) == slug(name),
         guild.categories,
     )
 
 
-def find_text_channel(guild: discord.Guild, channel_id_str: Optional[str], aliases: List[str], *, category: Optional[discord.CategoryChannel] = None) -> Optional[discord.TextChannel]:
-    if channel_id_str and channel_id_str.isdigit():
-        c = guild.get_channel(int(channel_id_str))
-        if isinstance(c, discord.TextChannel): return c
+def find_text_channel(guild: discord.Guild, aliases: List[str], *, category: Optional[discord.CategoryChannel] = None) -> Optional[discord.TextChannel]:
     wanted = {slug(name) for name in aliases if name}
     channels = category.text_channels if category is not None else guild.text_channels
     return discord.utils.find(
@@ -425,13 +411,13 @@ def find_text_channel(guild: discord.Guild, channel_id_str: Optional[str], alias
 
 def get_verify_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
     aliases = [VERIFY_CHANNEL_NAME, *VERIFY_CHANNEL_ALIASES]
-    return find_text_channel(guild, VERIFY_CHANNEL_ID, aliases)
+    return find_text_channel(guild, aliases)
 
 
 def get_welcome_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
-    home_category = find_category(guild, HOME_CATEGORY_ID, HOME_CATEGORY_NAME)
+    home_category = find_category(guild, HOME_CATEGORY_NAME)
     aliases = [WELCOME_CHANNEL_NAME, "bienvenue", "welcome"]
-    return find_text_channel(guild, WELCOME_CHANNEL_ID, aliases, category=home_category) or find_text_channel(guild, WELCOME_CHANNEL_ID, aliases)
+    return find_text_channel(guild, aliases, category=home_category) or find_text_channel(guild, aliases)
 
 
 def is_admin(member: discord.Member) -> bool:
@@ -452,7 +438,6 @@ def is_custom_voice(channel: Optional[discord.abc.GuildChannel]) -> bool:
 
 def is_create_voice_trigger(channel: Optional[discord.abc.GuildChannel]) -> bool:
     if not isinstance(channel, discord.VoiceChannel): return False
-    if CREATE_VOICE_TRIGGER_ID and str(channel.id) == str(CREATE_VOICE_TRIGGER_ID): return True
     return slug(channel.name) in {slug(n) for n in CREATE_VOICE_TRIGGER_ALIASES}
 
 
@@ -602,7 +587,7 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
     member = roles["member"]
     orga = roles["orga"]
 
-    # Au lieu d'écraser tous les salons, le bot met à jour le rôle global Non-Vérifié pour empêcher l'accès au serveur.
+    # Au lieu d'écraser tous les salons, le bot met à jour le rôle global Non-Vérifié pour empêcher l'accès au serveur par défaut.
     try:
         perms = non_verified.permissions
         perms.update(read_messages=False, send_messages=False, connect=False)
@@ -611,8 +596,8 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
         pass
 
     verify_channel = get_verify_channel(guild)
-    party_category = find_category(guild, PARTY_CATEGORY_ID, PARTY_CATEGORY_NAME)
-    orga_channel = find_text_channel(guild, ORGA_TEXT_CHANNEL_ID, [ORGA_TEXT_CHANNEL_NAME, "orga pp"], category=party_category)
+    party_category = find_category(guild, PARTY_CATEGORY_NAME)
+    orga_channel = find_text_channel(guild, [ORGA_TEXT_CHANNEL_NAME, "orga pp"], category=party_category)
 
     if verify_channel is not None:
         await _safe_set_permissions(verify_channel, default_role, view_channel=False, send_messages=False, add_reactions=False)
@@ -718,7 +703,7 @@ async def set_custom_voice_permissions(channel: discord.VoiceChannel, *, owner: 
 async def create_custom_voice_channel(guild: discord.Guild, owner: discord.Member, name: str, user_limit: int = 0) -> discord.VoiceChannel:
     category = guild.get_channel(CUSTOM_VOICE_CATEGORY_ID)
     if not isinstance(category, discord.CategoryChannel):
-        category = find_category(guild, None, CUSTOM_VOICE_CATEGORY_NAME) or find_category(guild, TAVERN_CATEGORY_ID, TAVERN_CATEGORY_NAME)
+        category = find_category(guild, CUSTOM_VOICE_CATEGORY_NAME) or find_category(guild, TAVERN_CATEGORY_NAME)
     channel = await guild.create_voice_channel(name=name, category=category, user_limit=max(0, min(99, user_limit)))
     db.register_custom_voice(channel.id, owner.id)
     await set_custom_voice_permissions(channel, owner=owner, locked=False)
@@ -1058,8 +1043,7 @@ def build_match_embeds(guild: discord.Guild, state: MatchState) -> List[discord.
         name="👥 Joueurs détectés dans la voc",
         value=(
             f"**{len(current_members)}** joueur(s) présent(s).\n"
-            f"La PP prend les **10 premiers arrivés** s'il y a plus de 10 joueurs.\n"
-            f"Le bouton **🚀 Lancer la PP** devient utile à partir de **10 joueurs**."
+            f"La PP prend les **10 premiers arrivés** s'il y a plus de 10 joueurs."
         ),
         inline=False,
     )
@@ -1574,7 +1558,7 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
 
 # ===================== COMMANDS =====================
-@bot.tree.command(name="setup_pp", description="Configure les rôles, permissions et panneaux PP sur les salons existants.")
+@bot.tree.command(name="setup_pp", description="Configure les rôles, permissions et panneaux PP sur les salons de la catégorie PP.")
 @app_commands.guild_only()
 @app_commands.checks.has_permissions(manage_guild=True)
 async def setup_pp(interaction: discord.Interaction) -> None:
@@ -1612,11 +1596,11 @@ async def setup_pp(interaction: discord.Interaction) -> None:
             )
             await verify_channel.send(embed=embed, view=VerificationView(guild))
 
-    text = "✅ Setup terminé.\n• Rejoins **Créer un salon** pour générer une voc privée avec panneau de boutons dans la catégorie configurée.\n"
+    text = "✅ Setup de la catégorie PP terminé.\n• Les autres salons du serveur ont été laissés indépendants.\n"
     if missing:
-        text += "⚠️ Salons introuvables : " + ", ".join(missing)
+        text += "⚠️ Salons PP introuvables : " + ", ".join(missing)
     else:
-        text += "Tous les salons requis ont été trouvés."
+        text += "Tous les salons PP requis ont été configurés avec succès."
     await interaction.followup.send(text, ephemeral=True)
 
 
