@@ -164,7 +164,7 @@ MAP_IMAGE: Dict[str, str] = {
     "Split":    "https://media.valorant-api.com/maps/d960549e-485c-e861-8d71-aa9d1aed12a2/splash.png",
     "Fracture": "https://media.valorant-api.com/maps/b529448b-4d60-346e-e89e-00a4c527a405/splash.png",
     "Bind":     "https://media.valorant-api.com/maps/2c9d57ec-4431-9c5e-2939-8f9ef6dd5cba/splash.png",
-    "Summit":   "https://media.valorant-api.com/maps/10b2df76-47b2-4d29-b690-3fb1c13cb21d/splash.png",
+    "Summit":   "https://cdn.discordapp.com/attachments/1460123533828030699/1531838845157638164/1200px-Loading_Screen_Summit.png?ex=6a6aab98&is=6a695a18&hm=5cea97a069046a65a7b5cd94f4dcd2b84bffc1e3d925b912f966f46dafd127ed&",
 }
 
 # Ordre d'arrivée dans chaque vocal Préparation.
