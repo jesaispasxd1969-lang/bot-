@@ -1589,7 +1589,7 @@ async def setup_pp(interaction: discord.Interaction) -> None:
         if should_post:
             embed = discord.Embed(
                 title="Vérification Valorant",
-                description="Choisis ton **rank Valorant** pour débloquer l'accès au serveur.\nLe salon est en **lecture seule** : tout se fait via le menu.",
+                description="Choisis ton **Peak Elo Valorant des 5 derniers actes** pour débloquer l'accès au serveur.\nLe salon est en **lecture seule** : tout se fait via le menu.",
                 color=discord.Color.blurple(),
             )
             await verify_channel.send(embed=embed, view=VerificationView(guild))
