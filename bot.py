@@ -55,12 +55,12 @@ CUSTOM_VOICE_CATEGORY_ID = int(os.getenv("CUSTOM_VOICE_CATEGORY_ID", "1460123537
 CUSTOM_VOICE_CATEGORY_NAME = os.getenv("CUSTOM_VOICE_CATEGORY_NAME", TAVERN_CATEGORY_NAME)
 CUSTOM_VOICE_DEFAULT_LIMIT = int(os.getenv("CUSTOM_VOICE_DEFAULT_LIMIT", "0"))
 
-CREATE_VOICE_TRIGGER_NAME = os.getenv("CREATE_VOICE_TRIGGER_NAME", "Créer un salon")
+CREATE_VOICE_TRIGGER_NAME = os.getenv("CREATE_VOICE_TRIGGER_NAME", "🔊・Créer un salon")
 CREATE_VOICE_TRIGGER_ALIASES = [
     name.strip()
     for name in os.getenv(
         "CREATE_VOICE_TRIGGER_ALIASES",
-        f"{CREATE_VOICE_TRIGGER_NAME},creer un salon,+ creer un salon,+ créer un salon",
+        f"{CREATE_VOICE_TRIGGER_NAME},creer un salon,+ creer un salon,+ 🔊・Créer un salonn",
     ).split(",")
     if name.strip()
 ]
