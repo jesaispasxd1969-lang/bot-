@@ -44,15 +44,17 @@ VERIFY_CHANNEL_ALIASES = [
     if name.strip()
 ]
 
-# Catégories optionnelles (si elles ne sont pas trouvées, le bot n'y touchera pas)
-HOME_CATEGORY_NAME = os.getenv("HOME_CATEGORY_NAME", "KAER MORHEN")
-TAVERN_CATEGORY_NAME = os.getenv("TAVERN_CATEGORY_NAME", "TAVERNE")
+# Nouvelles catégories et salons
+HOME_CATEGORY_NAME = os.getenv("HOME_CATEGORY_NAME", "⛩️ ・ GRAND PORTAIL ・ ⛩️")
+ARTISANS_CATEGORY_NAME = os.getenv("ARTISANS_CATEGORY_NAME", "🏯 ・ QUARTIER DES ARTISANS ・ 🏯")
+RANK_CATEGORY_NAME = os.getenv("RANK_CATEGORY_NAME", "🎭 ・ PARTIE PERSO ・ 🎭")
+RANK_CHANNEL_NAME = os.getenv("RANK_CHANNEL_NAME", "🎭・choisi-ton-rank")
 PARTY_CATEGORY_NAME = os.getenv("PARTY_CATEGORY_NAME", "PARTIE PERSO")
 ORGA_TEXT_CHANNEL_NAME = os.getenv("ORGA_TEXT_CHANNEL_NAME", "orga-pp")
 WELCOME_CHANNEL_NAME = os.getenv("WELCOME_CHANNEL_NAME", "bienvenue")
 
-CUSTOM_VOICE_CATEGORY_ID = int(os.getenv("CUSTOM_VOICE_CATEGORY_ID", "1460123537560965224"))
-CUSTOM_VOICE_CATEGORY_NAME = os.getenv("CUSTOM_VOICE_CATEGORY_NAME", TAVERN_CATEGORY_NAME)
+CUSTOM_VOICE_CATEGORY_ID = int(os.getenv("CUSTOM_VOICE_CATEGORY_ID", "0"))
+CUSTOM_VOICE_CATEGORY_NAME = os.getenv("CUSTOM_VOICE_CATEGORY_NAME", ARTISANS_CATEGORY_NAME)
 CUSTOM_VOICE_DEFAULT_LIMIT = int(os.getenv("CUSTOM_VOICE_DEFAULT_LIMIT", "0"))
 
 CREATE_VOICE_TRIGGER_NAME = os.getenv("CREATE_VOICE_TRIGGER_NAME", "🔊・Créer un salon")
@@ -60,7 +62,7 @@ CREATE_VOICE_TRIGGER_ALIASES = [
     name.strip()
     for name in os.getenv(
         "CREATE_VOICE_TRIGGER_ALIASES",
-        f"{CREATE_VOICE_TRIGGER_NAME},creer un salon,+ creer un salon,+ 🔊・Créer un salonn",
+        f"{CREATE_VOICE_TRIGGER_NAME},creer un salon,+ creer un salon,+ 🔊・Créer un salon",
     ).split(",")
     if name.strip()
 ]
@@ -414,6 +416,11 @@ def get_verify_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
     return find_text_channel(guild, aliases)
 
 
+def get_rank_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    category = find_category(guild, RANK_CATEGORY_NAME)
+    return find_text_channel(guild, [RANK_CHANNEL_NAME, "choisi-ton-rank"], category=category) or find_text_channel(guild, [RANK_CHANNEL_NAME])
+
+
 def get_welcome_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
     home_category = find_category(guild, HOME_CATEGORY_NAME)
     aliases = [WELCOME_CHANNEL_NAME, "bienvenue", "welcome"]
@@ -595,9 +602,11 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
         pass
 
     verify_channel = get_verify_channel(guild)
+    rank_channel = get_rank_channel(guild)
     party_category = find_category(guild, PARTY_CATEGORY_NAME)
     orga_channel = find_text_channel(guild, [ORGA_TEXT_CHANNEL_NAME, "orga pp"], category=party_category)
 
+    # Configuration du salon de vérification (Anti-Robot)
     if verify_channel is not None:
         await _safe_set_permissions(verify_channel, default_role, view_channel=False, send_messages=False, add_reactions=False)
         await _safe_set_permissions(verify_channel, member, view_channel=False, send_messages=False, add_reactions=False)
@@ -612,6 +621,30 @@ async def set_verification_permissions(guild: discord.Guild) -> None:
         )
         await _safe_set_permissions(
             verify_channel,
+            orga,
+            view_channel=True,
+            send_messages=True,
+            add_reactions=True,
+            read_message_history=True,
+            use_application_commands=True,
+            manage_messages=True,
+        )
+
+    # Configuration du salon de choix de rank
+    if rank_channel is not None:
+        await _safe_set_permissions(rank_channel, default_role, view_channel=False, send_messages=False, add_reactions=False)
+        await _safe_set_permissions(rank_channel, non_verified, view_channel=False, send_messages=False, add_reactions=False)
+        await _safe_set_permissions(
+            rank_channel,
+            member,
+            view_channel=True,
+            send_messages=False,
+            add_reactions=False,
+            read_message_history=True,
+            use_application_commands=True,
+        )
+        await _safe_set_permissions(
+            rank_channel,
             orga,
             view_channel=True,
             send_messages=True,
@@ -702,7 +735,7 @@ async def set_custom_voice_permissions(channel: discord.VoiceChannel, *, owner: 
 async def create_custom_voice_channel(guild: discord.Guild, owner: discord.Member, name: str, user_limit: int = 0) -> discord.VoiceChannel:
     category = guild.get_channel(CUSTOM_VOICE_CATEGORY_ID)
     if not isinstance(category, discord.CategoryChannel):
-        category = find_category(guild, CUSTOM_VOICE_CATEGORY_NAME) or find_category(guild, TAVERN_CATEGORY_NAME)
+        category = find_category(guild, CUSTOM_VOICE_CATEGORY_NAME) or find_category(guild, ARTISANS_CATEGORY_NAME)
     channel = await guild.create_voice_channel(name=name, category=category, user_limit=max(0, min(99, user_limit)))
     db.register_custom_voice(channel.id, owner.id)
     await set_custom_voice_permissions(channel, owner=owner, locked=False)
@@ -728,7 +761,7 @@ async def _build_custom_voice_panel_embed(channel: discord.VoiceChannel) -> disc
     embed = discord.Embed(
         title=f"🎤 {channel.name}",
         description=(
-            "Bienvenue dans ton salon privé, sorceleur.\n"
+            "Bienvenue dans ton salon privé.\n"
             "Utilise les boutons ci-dessous pour **verrouiller**, **renommer**, "
             "**changer les slots** ou **expulser** quelqu’un de la voc."
         ),
@@ -1081,7 +1114,34 @@ async def refresh_match_message(guild: discord.Guild, prep_channel_id: int) -> N
         pass
 
 
-# ===================== UI: VERIFICATION =====================
+# ===================== UI: CAPTCHA / VERIFICATION =====================
+class CaptchaView(discord.ui.View):
+    def __init__(self, guild: Optional[discord.Guild] = None):
+        super().__init__(timeout=None)
+        
+    @discord.ui.button(label="✅ Je ne suis pas un robot", style=discord.ButtonStyle.success, custom_id="pp:verify:captcha")
+    async def captcha_btn(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+        
+        roles = await ensure_core_roles(interaction.guild)
+        
+        # Retire le rôle non vérifié et ajoute le rôle joueur (Pèlerin)
+        try:
+            if roles["non_verified"] in interaction.user.roles:
+                await interaction.user.remove_roles(roles["non_verified"], reason="Captcha validé")
+            if roles["player"] not in interaction.user.roles:
+                await interaction.user.add_roles(roles["player"], reason="Captcha validé")
+        except discord.Forbidden:
+            return await interaction.response.send_message("Erreur de permissions pour t'attribuer le rôle.", ephemeral=True)
+            
+        await interaction.response.send_message(
+            f"✅ **Vérification réussie !** Tu as obtenu le rôle {roles['player'].mention}.\n"
+            f"N'oublie pas de te rendre dans le salon **{RANK_CHANNEL_NAME}** pour choisir ton grade.",
+            ephemeral=True
+        )
+
+
 class RankSelect(discord.ui.Select):
     def __init__(self, guild: Optional[discord.Guild] = None):
         options = [
@@ -1108,7 +1168,7 @@ class RankSelect(discord.ui.Select):
         chosen_rank = self.values[0]
         await apply_rank(interaction.user, chosen_rank)
         await interaction.response.send_message(
-            f"✅ Rank enregistré : **{chosen_rank}**. Tu as maintenant accès au serveur.",
+            f"✅ Rank enregistré : **{chosen_rank}**. Ton profil est à jour.",
             ephemeral=True,
         )
 
@@ -1469,6 +1529,7 @@ class PPBot(commands.Bot):
         super().__init__(command_prefix="!", intents=INTENTS)
 
     async def setup_hook(self) -> None:
+        self.add_view(CaptchaView())
         self.add_view(VerificationView())
         self.add_view(PPMatchView())
         self.add_view(CustomVoiceControlView())
@@ -1501,14 +1562,14 @@ async def on_member_join(member: discord.Member) -> None:
     welcome_channel = get_welcome_channel(member.guild)
     if welcome_channel is not None:
         embed = discord.Embed(
-            title="🐺 Bienvenue à Kaer Morhen",
+            title="⛩️ Bienvenue à Asakusa",
             description=(
-                f"{member.mention}, le Loup Blanc t'ouvre les portes du fort.\n"
-                f"Passe d'abord par **{VERIFY_CHANNEL_NAME}** pour choisir ton rang et rejoindre la chasse."
+                f"{member.mention}, les portes du temple s'ouvrent devant toi.\n"
+                f"Passe d'abord par **{VERIFY_CHANNEL_NAME}** pour prouver que tu n'es pas un robot."
             ),
             color=discord.Color.gold(),
         )
-        embed.set_footer(text="Les sorceleurs se préparent. Choisis ton rang et entre dans l'arène.")
+        embed.set_footer(text="Une fois vérifié, n'oublie pas de choisir ton rang !")
         try:
             await welcome_channel.send(embed=embed)
         except (discord.Forbidden, discord.HTTPException):
@@ -1544,7 +1605,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
                 f"🎤 Salon de {member.display_name}",
                 CUSTOM_VOICE_DEFAULT_LIMIT,
             )
-            # LA LIGNE A ÉTÉ SUPPRIMÉE ICI POUR ÉVITER LE DOUBLON
             return
 
         if is_prep_voice(after.channel) and (not before.channel or before.channel.id != after.channel.id):
@@ -1569,9 +1629,14 @@ async def setup_pp(interaction: discord.Interaction) -> None:
     await set_verification_permissions(guild)
 
     verify_channel = get_verify_channel(guild)
+    rank_channel = get_rank_channel(guild)
     missing: List[str] = []
+    
     if verify_channel is None:
         missing.append(f"#{VERIFY_CHANNEL_NAME} (ou alias de vérification)")
+    if rank_channel is None:
+        missing.append(f"#{RANK_CHANNEL_NAME} (ou alias pour le rank)")
+        
     for name in PREP_CHANNEL_NAMES:
         found = discord.utils.find(
             lambda c: isinstance(c, discord.VoiceChannel) and slug(c.name) == slug(name),
@@ -1580,6 +1645,7 @@ async def setup_pp(interaction: discord.Interaction) -> None:
         if found is None:
             missing.append(name)
 
+    # Déploiement du message Captcha
     if verify_channel is not None:
         should_post = True
         async for msg in verify_channel.history(limit=20):
@@ -1588,17 +1654,33 @@ async def setup_pp(interaction: discord.Interaction) -> None:
                 break
         if should_post:
             embed = discord.Embed(
-                title="Vérification Valorant",
-                description="Choisis ton **Peak Elo Valorant des 5 derniers actes** pour débloquer l'accès au serveur.\nLe salon est en **lecture seule** : tout se fait via le menu.",
+                title="🛡️ Vérification de sécurité",
+                description="Bienvenue à Asakusa ! Avant de pouvoir entrer et discuter, prouve que tu n'es pas un robot en cliquant sur le bouton ci-dessous.",
+                color=discord.Color.green(),
+            )
+            await verify_channel.send(embed=embed, view=CaptchaView(guild))
+
+    # Déploiement du message de choix de Rank
+    if rank_channel is not None:
+        should_post = True
+        async for msg in rank_channel.history(limit=20):
+            if msg.author == guild.me and msg.components:
+                should_post = False
+                break
+        if should_post:
+            embed = discord.Embed(
+                title="🎭 Choix du Rank Valorant",
+                description="Choisis ton **Peak Elo Valorant des 5 derniers actes** pour mettre à jour ton profil.\nLe salon est en **lecture seule** : tout se fait via le menu.",
                 color=discord.Color.blurple(),
             )
-            await verify_channel.send(embed=embed, view=VerificationView(guild))
+            await rank_channel.send(embed=embed, view=VerificationView(guild))
+
 
     text = "✅ Setup de la catégorie PP terminé.\n• Les autres salons du serveur ont été laissés indépendants.\n"
     if missing:
-        text += "⚠️ Salons PP introuvables : " + ", ".join(missing)
+        text += "⚠️ Salons introuvables : " + ", ".join(missing)
     else:
-        text += "Tous les salons PP requis ont été configurés avec succès."
+        text += "Tous les salons requis ont été configurés avec succès."
     await interaction.followup.send(text, ephemeral=True)
 
 
