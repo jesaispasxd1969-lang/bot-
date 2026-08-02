@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 import math
 import statistics
+import asyncio
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Tuple
@@ -52,6 +53,10 @@ RANK_CHANNEL_NAME = os.getenv("RANK_CHANNEL_NAME", "🎭・choisi-ton-rank")
 PARTY_CATEGORY_NAME = os.getenv("PARTY_CATEGORY_NAME", "PARTIE PERSO")
 ORGA_TEXT_CHANNEL_NAME = os.getenv("ORGA_TEXT_CHANNEL_NAME", "orga-pp")
 WELCOME_CHANNEL_NAME = os.getenv("WELCOME_CHANNEL_NAME", "bienvenue")
+
+# Config Tickets
+TICKET_CATEGORY_NAME = os.getenv("TICKET_CATEGORY_NAME", "🏮 ・ TICKETS D'ASAKUSA ・ 🏮")
+TICKET_CHANNEL_NAME = os.getenv("TICKET_CHANNEL_NAME", "├🎟️・créer-un-ticket")
 
 CUSTOM_VOICE_CATEGORY_ID = int(os.getenv("CUSTOM_VOICE_CATEGORY_ID", "0"))
 CUSTOM_VOICE_CATEGORY_NAME = os.getenv("CUSTOM_VOICE_CATEGORY_NAME", ARTISANS_CATEGORY_NAME)
@@ -1114,6 +1119,77 @@ async def refresh_match_message(guild: discord.Guild, prep_channel_id: int) -> N
         pass
 
 
+# ===================== UI: TICKETS =====================
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🎟️ Créer un ticket", style=discord.ButtonStyle.primary, custom_id="ticket:create")
+    async def create_ticket(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+            
+        guild = interaction.guild
+        user = interaction.user
+        
+        ticket_name = f"ticket-{slug(user.display_name).replace(' ', '-')}"
+        existing_channel = discord.utils.get(guild.text_channels, name=ticket_name)
+        
+        if existing_channel:
+            return await interaction.response.send_message(f"Tu as déjà un ticket ouvert : {existing_channel.mention}", ephemeral=True)
+
+        category = find_category(guild, TICKET_CATEGORY_NAME)
+        if not category:
+            return await interaction.response.send_message("La catégorie de tickets est introuvable. Demande à un administrateur de refaire le /setup_pp.", ephemeral=True)
+
+        roles = await ensure_core_roles(guild)
+        orga_role = roles["orga"]
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True),
+            orga_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
+        }
+
+        ticket_channel = await guild.create_text_channel(
+            name=ticket_name,
+            category=category,
+            overwrites=overwrites,
+            topic=f"Ticket de {user.id}"
+        )
+
+        await interaction.response.send_message(f"✅ Ticket créé avec succès : {ticket_channel.mention}", ephemeral=True)
+
+        embed = discord.Embed(
+            title="🎟️ Ticket Ouvert",
+            description=(
+                f"Bienvenue {user.mention} !\n"
+                f"Un membre du staff ({orga_role.mention}) va te répondre sous peu.\n\n"
+                "Merci d'expliquer ta demande en détail (Recrutement Staff, Preuve pour le rôle Radiant, ou autre problème)."
+            ),
+            color=discord.Color.gold()
+        )
+        await ticket_channel.send(content=f"{user.mention} {orga_role.mention}", embed=embed, view=TicketActiveView())
+
+
+class TicketActiveView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🔒 Fermer le ticket", style=discord.ButtonStyle.danger, custom_id="ticket:close")
+    async def close_ticket(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+            
+        await interaction.response.send_message("🔒 Le ticket sera supprimé dans 5 secondes...")
+        await asyncio.sleep(5)
+        try:
+            if isinstance(interaction.channel, discord.TextChannel):
+                await interaction.channel.delete(reason=f"Ticket fermé par {interaction.user.display_name}")
+        except discord.HTTPException:
+            pass
+
+
 # ===================== UI: CAPTCHA / VERIFICATION =====================
 class CaptchaView(discord.ui.View):
     def __init__(self, guild: Optional[discord.Guild] = None):
@@ -1533,6 +1609,8 @@ class PPBot(commands.Bot):
         self.add_view(VerificationView())
         self.add_view(PPMatchView())
         self.add_view(CustomVoiceControlView())
+        self.add_view(TicketPanelView())
+        self.add_view(TicketActiveView())
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -1625,7 +1703,7 @@ async def setup_pp(interaction: discord.Interaction) -> None:
         return await interaction.response.send_message("Commande réservée aux admins du serveur.", ephemeral=True)
     await interaction.response.defer(ephemeral=True, thinking=True)
 
-    await ensure_core_roles(guild)
+    roles = await ensure_core_roles(guild)
     await set_verification_permissions(guild)
 
     verify_channel = get_verify_channel(guild)
@@ -1675,6 +1753,52 @@ async def setup_pp(interaction: discord.Interaction) -> None:
             )
             await rank_channel.send(embed=embed, view=VerificationView(guild))
 
+
+    # === CRÉATION ET CONFIGURATION DES TICKETS ===
+    ticket_category = find_category(guild, TICKET_CATEGORY_NAME)
+    if not ticket_category:
+        ticket_category = await guild.create_category(TICKET_CATEGORY_NAME)
+
+    ticket_channel = find_text_channel(guild, [TICKET_CHANNEL_NAME], category=ticket_category)
+    if not ticket_channel:
+        ticket_channel = await guild.create_text_channel(
+            name=TICKET_CHANNEL_NAME,
+            category=ticket_category
+        )
+
+    await _safe_set_permissions(ticket_channel, guild.default_role, view_channel=False)
+    await _safe_set_permissions(ticket_channel, roles["non_verified"], view_channel=False)
+    await _safe_set_permissions(
+        ticket_channel,
+        roles["member"],
+        view_channel=True, send_messages=False, add_reactions=False, read_message_history=True
+    )
+    await _safe_set_permissions(
+        ticket_channel,
+        roles["orga"],
+        view_channel=True, send_messages=True, add_reactions=True, read_message_history=True, manage_messages=True
+    )
+
+    should_post_ticket = True
+    async for msg in ticket_channel.history(limit=20):
+        if msg.author == guild.me and msg.components:
+            should_post_ticket = False
+            break
+
+    if should_post_ticket:
+        embed = discord.Embed(
+            title="🎟️ Assistance & Requêtes",
+            description=(
+                "Bienvenue au comptoir d'assistance d'Asakusa !\n\n"
+                "Clique sur le bouton ci-dessous pour ouvrir un ticket privé avec le staff.\n\n"
+                "**Utilise ce système pour :**\n"
+                "• 📝 Demander à être recruté dans le staff.\n"
+                "• 🌟 Demander l'attribution du rôle **Radiant** (merci de fournir des preuves in-game).\n"
+                "• ❓ Toute autre question, problème ou signalement."
+            ),
+            color=discord.Color.red()
+        )
+        await ticket_channel.send(embed=embed, view=TicketPanelView())
 
     text = "✅ Setup de la catégorie PP terminé.\n• Les autres salons du serveur ont été laissés indépendants.\n"
     if missing:
