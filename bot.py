@@ -395,7 +395,7 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
         except Exception:
             pass
 
-    # 2. Base Background (Image Demandée)
+    # 2. Base Background (Nouvelle Image Demandée)
     bg_url = "https://cdn.discordapp.com/attachments/1460123533828030699/1533549541972902030/a0e0ef14cf5902013f6c12e94e79e45f.png?ex=6a70e4ce&is=6a6f934e&hm=3c2e90efd79c22aff07b073e636d21525ef46595a6d82f2df5bf57d2505527e7&"
     try:
         req = urllib.request.Request(bg_url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -431,21 +431,20 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
     bg.paste(border_mask, (319, 29), border_mask)
     bg.paste(circular_avatar, (325, 35), circular_avatar)
 
-    # 4. Text Configuration (En bas, gros, gras, blanc contour noir)
+    # 4. Text Configuration (En bas, très gros, gras, blanc avec gros contour noir)
     text_title = f"BIENVENUE {member.display_name.upper()} !"
     text_sub = f"Tu es le membre n°{member.guild.member_count}"
     
-    title_size = 65
+    title_size = 85 # Taille de base très grande
     try:
         font_title = ImageFont.truetype(font_path_title, title_size)
-        font_sub = ImageFont.truetype(font_path_sub, 30)
     except Exception:
-        font_title = font_sub = ImageFont.load_default()
+        font_title = ImageFont.load_default()
 
-    # Redimensionnement auto si le pseudo est immense
+    # Redimensionnement auto si le pseudo est trop long pour l'image
     try:
         title_width = draw.textlength(text_title, font=font_title)
-        while title_width > 760 and title_size > 35:
+        while title_width > 760 and title_size > 40:
             title_size -= 2
             font_title = ImageFont.truetype(font_path_title, title_size)
             title_width = draw.textlength(text_title, font=font_title)
@@ -456,24 +455,33 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
     title_x = (800 - title_width) / 2
     title_y = 210
 
+    # Configuration du sous-titre
+    sub_size = 40
+    try:
+        font_sub = ImageFont.truetype(font_path_sub, sub_size)
+    except Exception:
+        font_sub = ImageFont.load_default()
+
     try:
         sub_width = draw.textlength(text_sub, font=font_sub)
     except AttributeError:
         sub_width = font_sub.getsize(text_sub)[0]
         
     sub_x = (800 - sub_width) / 2
-    sub_y = 300
+    sub_y = 310
 
-    # Fonction pour dessiner avec contour
+    # Fonction pour dessiner le texte avec de gros contours
     def draw_text_with_outline(x, y, text, font, text_color, outline_color, outline_width):
         for adj_x in range(-outline_width, outline_width + 1):
             for adj_y in range(-outline_width, outline_width + 1):
+                if adj_x == 0 and adj_y == 0:
+                    continue
                 draw.text((x + adj_x, y + adj_y), text, font=font, fill=outline_color)
         draw.text((x, y), text, font=font, fill=text_color)
 
     # Dessin des textes
-    draw_text_with_outline(title_x, title_y, text_title, font_title, (255, 255, 255), (0, 0, 0), 3)
-    draw_text_with_outline(sub_x, sub_y, text_sub, font_sub, (255, 255, 255), (0, 0, 0), 2)
+    draw_text_with_outline(title_x, title_y, text_title, font_title, (255, 255, 255), (0, 0, 0), 4) # Contour épais de 4 pixels pour le gros texte
+    draw_text_with_outline(sub_x, sub_y, text_sub, font_sub, (255, 255, 255), (0, 0, 0), 2) # Contour de 2 pour le sous-titre
 
     buffer = io.BytesIO()
     bg.convert("RGB").save(buffer, format="PNG")
@@ -1840,8 +1848,7 @@ async def on_member_join(member: discord.Member) -> None:
                 title="⛩️ Bienvenue à Asakusa",
                 description=(
                     f"{member.mention}, les portes du temple s'ouvrent devant toi.\n"
-                    f"Tu as été invité(e) par **{inviter_mention}**.\n"
-                    f"Tu es le membre n°{member.guild.member_count} !\n\n"
+                    f"Tu as été invité(e) par **{inviter_mention}**.\n\n"
                     f"Passe d'abord par **{VERIFY_CHANNEL_NAME}** pour prouver que tu n'es pas un robot."
                 ),
                 color=discord.Color.gold(),
