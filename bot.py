@@ -112,7 +112,7 @@ INTENTS.members = True
 INTENTS.voice_states = True
 INTENTS.messages = True
 INTENTS.message_content = False
-INTENTS.invites = True # Essentiel pour le tracker d'invitations
+INTENTS.invites = True
 
 RANK_OPTIONS: List[Tuple[str, int]] = [
     ("Fer 1", 100), ("Fer 2", 110), ("Fer 3", 120),
@@ -380,29 +380,36 @@ class MatchState:
 
 # ===================== IMAGE GENERATION =====================
 async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
-    # 1. Prepare font
-    font_path = "Roboto-Bold.ttf"
-    if not os.path.exists(font_path):
+    # 1. Download Montserrat fonts to mimic Koya style
+    font_path_title = "Montserrat-Black.ttf"
+    if not os.path.exists(font_path_title):
         try:
-            urllib.request.urlretrieve("https://github.com/google/fonts/raw/main/ofl/roboto/Roboto-Bold.ttf", font_path)
+            urllib.request.urlretrieve("https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat-Black.ttf", font_path_title)
         except Exception:
             pass 
 
+    font_path_sub = "Montserrat-Bold.ttf"
+    if not os.path.exists(font_path_sub):
+        try:
+            urllib.request.urlretrieve("https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat-Bold.ttf", font_path_sub)
+        except Exception:
+            pass
+
     # 2. Base Background (Image Demandée)
-    bg_url = "https://cdn.discordapp.com/attachments/1460123533828030699/1533547290625703946/premium_photo-1666700698920-d2d2bba589f8.png?ex=6a70e2b6&is=6a6f9136&hm=e245b7954b0eb7c4302797ab7f86a2face3098f183cce2fb3a01970efd749e6f&"
+    bg_url = "https://cdn.discordapp.com/attachments/1460123533828030699/1533549541972902030/a0e0ef14cf5902013f6c12e94e79e45f.png?ex=6a70e4ce&is=6a6f934e&hm=3c2e90efd79c22aff07b073e636d21525ef46595a6d82f2df5bf57d2505527e7&"
     try:
         req = urllib.request.Request(bg_url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as response:
             bg_bytes = response.read()
         bg = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
-        bg = bg.resize((800, 400)) # Format bannière
+        bg = bg.resize((800, 400)) # Format bannière large
     except Exception:
         # Fallback si l'image ne charge pas
         bg = Image.new("RGBA", (800, 400), (20, 22, 28, 255))
         
     draw = ImageDraw.Draw(bg)
 
-    # 3. Avatar Processing (Centré)
+    # 3. Avatar Processing (Centré au milieu en haut)
     avatar_bytes = await member.display_avatar.replace(size=256, format="png").read()
     avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
     avatar = avatar.resize((150, 150))
@@ -415,43 +422,58 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
     circular_avatar = Image.new("RGBA", (150, 150))
     circular_avatar.paste(avatar, (0, 0), mask)
 
-    # Centrage X=(800 - 150)/2 = 325. Centrage Y manuel=50.
+    # Centrage X=(800 - 150)/2 = 325. Position Y = 35.
     border_size = 162
     border_mask = Image.new("RGBA", (border_size, border_size), (0, 0, 0, 0))
     border_draw = ImageDraw.Draw(border_mask)
     border_draw.ellipse((0, 0, border_size, border_size), fill=(231, 76, 60, 255))
     
-    bg.paste(border_mask, (319, 44), border_mask)
-    bg.paste(circular_avatar, (325, 50), circular_avatar)
+    bg.paste(border_mask, (319, 29), border_mask)
+    bg.paste(circular_avatar, (325, 35), circular_avatar)
 
     # 4. Text Configuration (En bas, gros, gras, blanc contour noir)
-    try:
-        font_title = ImageFont.truetype(font_path, 46)
-    except Exception:
-        font_title = ImageFont.load_default()
-
-    text = f"BIENVENUE {member.display_name.upper()} !"
+    text_title = f"BIENVENUE {member.display_name.upper()} !"
+    text_sub = f"Tu es le membre n°{member.guild.member_count}"
     
+    title_size = 65
     try:
-        text_width = draw.textlength(text, font=font_title)
+        font_title = ImageFont.truetype(font_path_title, title_size)
+        font_sub = ImageFont.truetype(font_path_sub, 30)
+    except Exception:
+        font_title = font_sub = ImageFont.load_default()
+
+    # Redimensionnement auto si le pseudo est immense
+    try:
+        title_width = draw.textlength(text_title, font=font_title)
+        while title_width > 760 and title_size > 35:
+            title_size -= 2
+            font_title = ImageFont.truetype(font_path_title, title_size)
+            title_width = draw.textlength(text_title, font=font_title)
     except AttributeError:
         # Fallback pour vieilles versions Pillow
-        text_width = font_title.getsize(text)[0]
+        title_width = font_title.getsize(text_title)[0]
+
+    title_x = (800 - title_width) / 2
+    title_y = 210
+
+    try:
+        sub_width = draw.textlength(text_sub, font=font_sub)
+    except AttributeError:
+        sub_width = font_sub.getsize(text_sub)[0]
         
-    text_x = (800 - text_width) / 2
-    text_y = 240
+    sub_x = (800 - sub_width) / 2
+    sub_y = 300
 
-    # Dessin Contour Noir
-    outline_color = (0, 0, 0)
-    text_color = (255, 255, 255)
-    outline_width = 3
+    # Fonction pour dessiner avec contour
+    def draw_text_with_outline(x, y, text, font, text_color, outline_color, outline_width):
+        for adj_x in range(-outline_width, outline_width + 1):
+            for adj_y in range(-outline_width, outline_width + 1):
+                draw.text((x + adj_x, y + adj_y), text, font=font, fill=outline_color)
+        draw.text((x, y), text, font=font, fill=text_color)
 
-    for adj_x in range(-outline_width, outline_width + 1):
-        for adj_y in range(-outline_width, outline_width + 1):
-            draw.text((text_x + adj_x, text_y + adj_y), text, font=font_title, fill=outline_color)
-            
-    # Dessin Texte Blanc
-    draw.text((text_x, text_y), text, font=font_title, fill=text_color)
+    # Dessin des textes
+    draw_text_with_outline(title_x, title_y, text_title, font_title, (255, 255, 255), (0, 0, 0), 3)
+    draw_text_with_outline(sub_x, sub_y, text_sub, font_sub, (255, 255, 255), (0, 0, 0), 2)
 
     buffer = io.BytesIO()
     bg.convert("RGB").save(buffer, format="PNG")
@@ -1805,8 +1827,7 @@ async def on_member_join(member: discord.Member) -> None:
     if welcome_channel is not None:
         msg_content = (
             f"⛩️ Bienvenue dans les ruelles d'Asakusa, {member.mention} !\n"
-            f"Tu as été invité(e) par **{inviter_mention}**.\n"
-            f"Tu es le membre n°{member.guild.member_count} !"
+            f"Tu as été invité(e) par **{inviter_mention}**."
         )
         try:
             # Génération de l'image personnalisée
