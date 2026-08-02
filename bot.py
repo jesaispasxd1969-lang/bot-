@@ -388,15 +388,21 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
         except Exception:
             pass 
 
-    # 2. Base Background (Dark theme Asakusa vibe)
-    bg = Image.new("RGB", (800, 250), (20, 22, 28))
+    # 2. Base Background (Image Demandée)
+    bg_url = "https://cdn.discordapp.com/attachments/1460123533828030699/1533547290625703946/premium_photo-1666700698920-d2d2bba589f8.png?ex=6a70e2b6&is=6a6f9136&hm=e245b7954b0eb7c4302797ab7f86a2face3098f183cce2fb3a01970efd749e6f&"
+    try:
+        req = urllib.request.Request(bg_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            bg_bytes = response.read()
+        bg = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
+        bg = bg.resize((800, 400)) # Format bannière
+    except Exception:
+        # Fallback si l'image ne charge pas
+        bg = Image.new("RGBA", (800, 400), (20, 22, 28, 255))
+        
     draw = ImageDraw.Draw(bg)
 
-    # Decor lines
-    draw.rectangle([0, 0, 800, 15], fill=(231, 76, 60)) # Red top
-    draw.rectangle([0, 235, 800, 250], fill=(231, 76, 60)) # Red bottom
-
-    # 3. Download & Process Avatar
+    # 3. Avatar Processing (Centré)
     avatar_bytes = await member.display_avatar.replace(size=256, format="png").read()
     avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
     avatar = avatar.resize((150, 150))
@@ -409,29 +415,46 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
     circular_avatar = Image.new("RGBA", (150, 150))
     circular_avatar.paste(avatar, (0, 0), mask)
 
-    # Red Border
-    border_mask = Image.new("RGBA", (162, 162), (0, 0, 0, 0))
+    # Centrage X=(800 - 150)/2 = 325. Centrage Y manuel=50.
+    border_size = 162
+    border_mask = Image.new("RGBA", (border_size, border_size), (0, 0, 0, 0))
     border_draw = ImageDraw.Draw(border_mask)
-    border_draw.ellipse((0, 0, 162, 162), fill=(231, 76, 60, 255))
+    border_draw.ellipse((0, 0, border_size, border_size), fill=(231, 76, 60, 255))
     
-    bg.paste(border_mask, (44, 44), border_mask)
-    bg.paste(circular_avatar, (50, 50), circular_avatar)
+    bg.paste(border_mask, (319, 44), border_mask)
+    bg.paste(circular_avatar, (325, 50), circular_avatar)
 
-    # 4. Text Configuration
+    # 4. Text Configuration (En bas, gros, gras, blanc contour noir)
     try:
-        font_title = ImageFont.truetype(font_path, 42)
-        font_subtitle = ImageFont.truetype(font_path, 32)
-        font_count = ImageFont.truetype(font_path, 20)
+        font_title = ImageFont.truetype(font_path, 46)
     except Exception:
-        font_title = font_subtitle = font_count = ImageFont.load_default()
+        font_title = ImageFont.load_default()
 
-    # Draw Text
-    draw.text((230, 60), "BIENVENUE !", font=font_title, fill=(255, 255, 255))
-    draw.text((230, 115), f"{member.name}", font=font_subtitle, fill=(200, 210, 220))
-    draw.text((230, 165), f"Tu es le membre n°{member.guild.member_count}", font=font_count, fill=(231, 76, 60))
+    text = f"BIENVENUE {member.display_name.upper()} !"
+    
+    try:
+        text_width = draw.textlength(text, font=font_title)
+    except AttributeError:
+        # Fallback pour vieilles versions Pillow
+        text_width = font_title.getsize(text)[0]
+        
+    text_x = (800 - text_width) / 2
+    text_y = 240
+
+    # Dessin Contour Noir
+    outline_color = (0, 0, 0)
+    text_color = (255, 255, 255)
+    outline_width = 3
+
+    for adj_x in range(-outline_width, outline_width + 1):
+        for adj_y in range(-outline_width, outline_width + 1):
+            draw.text((text_x + adj_x, text_y + adj_y), text, font=font_title, fill=outline_color)
+            
+    # Dessin Texte Blanc
+    draw.text((text_x, text_y), text, font=font_title, fill=text_color)
 
     buffer = io.BytesIO()
-    bg.save(buffer, format="PNG")
+    bg.convert("RGB").save(buffer, format="PNG")
     buffer.seek(0)
     return buffer
 
@@ -1187,6 +1210,27 @@ async def refresh_match_message(guild: discord.Guild, prep_channel_id: int) -> N
 
 
 # ===================== UI: TICKETS =====================
+class TicketStaffView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🗑️ Supprimer le ticket", style=discord.ButtonStyle.danger, custom_id="ticket:delete")
+    async def delete_ticket(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not isinstance(interaction.user, discord.Member):
+            return
+        # Vérifie si le membre a les permissions Orga PP ou le rôle Metsuke
+        if not has_orga_access(interaction.user) and not any(r.id == METSUKE_ROLE_ID for r in interaction.user.roles):
+            return await interaction.response.send_message("Seul le staff peut supprimer définitivement le ticket.", ephemeral=True)
+        
+        await interaction.response.send_message("🗑️ Suppression du ticket dans 5 secondes...")
+        await asyncio.sleep(5)
+        try:
+            if isinstance(interaction.channel, discord.TextChannel):
+                await interaction.channel.delete(reason=f"Ticket supprimé par {interaction.user.display_name}")
+        except discord.HTTPException:
+            pass
+
+
 class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1232,7 +1276,7 @@ class TicketPanelView(discord.ui.View):
             title="🎟️ Ticket Ouvert",
             description=(
                 f"Bienvenue {user.mention} !\n"
-                f"Un {metsuke_role.mention} va te répondre sous peu.\n\n"
+                f"Un membre du staff ({metsuke_role.mention}) va te répondre sous peu.\n\n"
                 "Merci d'expliquer ta demande en détail (Recrutement Staff, Preuve pour le rôle Radiant, ou autre problème)."
             ),
             color=discord.Color.gold()
@@ -1249,13 +1293,24 @@ class TicketActiveView(discord.ui.View):
         if not isinstance(interaction.user, discord.Member):
             return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
             
-        await interaction.response.send_message("🔒 Le ticket sera supprimé dans 5 secondes...")
-        await asyncio.sleep(5)
+        if not isinstance(interaction.channel, discord.TextChannel):
+            return
+
+        await interaction.response.send_message("🔒 Le ticket a été fermé. Il est maintenant masqué pour toi.", ephemeral=True)
+        
+        # Retire la permission de voir le salon à l'utilisateur
         try:
-            if isinstance(interaction.channel, discord.TextChannel):
-                await interaction.channel.delete(reason=f"Ticket fermé par {interaction.user.display_name}")
+            await interaction.channel.set_permissions(interaction.user, view_channel=False)
         except discord.HTTPException:
             pass
+
+        embed = discord.Embed(
+            title="🔒 Ticket fermé",
+            description=f"Le ticket a été fermé par {interaction.user.mention}.\nLe staff peut désormais consulter les logs ou le supprimer définitivement.",
+            color=discord.Color.dark_gray()
+        )
+        # Permet au staff de supprimer définitivement
+        await interaction.channel.send(embed=embed, view=TicketStaffView())
 
 
 # ===================== UI: CAPTCHA / VERIFICATION =====================
@@ -1680,6 +1735,7 @@ class PPBot(commands.Bot):
         self.add_view(CustomVoiceControlView())
         self.add_view(TicketPanelView())
         self.add_view(TicketActiveView())
+        self.add_view(TicketStaffView())
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             self.tree.copy_global_to(guild=guild)
@@ -1731,7 +1787,7 @@ async def on_member_join(member: discord.Member) -> None:
         pass
 
     # ================= TRACKER INVITATION =================
-    inviter_mention = "un lien générique (ex: /asak)"
+    inviter_mention = "/asak"
     try:
         old_invites = bot.invites_cache.get(member.guild.id, [])
         new_invites = await member.guild.invites()
@@ -1747,19 +1803,24 @@ async def on_member_join(member: discord.Member) -> None:
 
     welcome_channel = get_welcome_channel(member.guild)
     if welcome_channel is not None:
+        msg_content = (
+            f"⛩️ Bienvenue dans les ruelles d'Asakusa, {member.mention} !\n"
+            f"Tu as été invité(e) par **{inviter_mention}**.\n"
+            f"Tu es le membre n°{member.guild.member_count} !"
+        )
         try:
-            # Essayer de générer l'image s'il y a Pillow
+            # Génération de l'image personnalisée
             img_buffer = await generate_welcome_card(member)
             file = discord.File(fp=img_buffer, filename="welcome.png")
-            msg_content = f"⛩️ Bienvenue dans les ruelles d'Asakusa, {member.mention} ! Tu as été invité(e) par **{inviter_mention}**."
             await welcome_channel.send(content=msg_content, file=file)
         except Exception as e:
-            # Fallback (Si Pillow n'est pas installé ou s'il y a un bug d'image)
+            # Fallback en cas d'erreur de la librairie d'image
             embed = discord.Embed(
                 title="⛩️ Bienvenue à Asakusa",
                 description=(
                     f"{member.mention}, les portes du temple s'ouvrent devant toi.\n"
-                    f"Tu as été invité(e) par **{inviter_mention}**.\n\n"
+                    f"Tu as été invité(e) par **{inviter_mention}**.\n"
+                    f"Tu es le membre n°{member.guild.member_count} !\n\n"
                     f"Passe d'abord par **{VERIFY_CHANNEL_NAME}** pour prouver que tu n'es pas un robot."
                 ),
                 color=discord.Color.gold(),
