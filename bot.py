@@ -380,22 +380,15 @@ class MatchState:
 
 # ===================== IMAGE GENERATION =====================
 async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
-    # 1. Download Montserrat fonts to mimic Koya style
+    # 1. Download Montserrat-Black font for Koya style
     font_path_title = "Montserrat-Black.ttf"
     if not os.path.exists(font_path_title):
         try:
-            urllib.request.urlretrieve("https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat-Black.ttf", font_path_title)
-        except Exception:
-            pass 
+            urllib.request.urlretrieve("https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat-Black.ttf", font_path_title)
+        except Exception as e:
+            print(f"[WARN] Téléchargement police échoué : {e}")
 
-    font_path_sub = "Montserrat-Bold.ttf"
-    if not os.path.exists(font_path_sub):
-        try:
-            urllib.request.urlretrieve("https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat-Bold.ttf", font_path_sub)
-        except Exception:
-            pass
-
-    # 2. Base Background (Nouvelle Image Demandée)
+    # 2. Base Background
     bg_url = "https://cdn.discordapp.com/attachments/1460123533828030699/1533549541972902030/a0e0ef14cf5902013f6c12e94e79e45f.png?ex=6a70e4ce&is=6a6f934e&hm=3c2e90efd79c22aff07b073e636d21525ef46595a6d82f2df5bf57d2505527e7&"
     try:
         req = urllib.request.Request(bg_url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -404,7 +397,6 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
         bg = Image.open(io.BytesIO(bg_bytes)).convert("RGBA")
         bg = bg.resize((800, 400)) # Format bannière large
     except Exception:
-        # Fallback si l'image ne charge pas
         bg = Image.new("RGBA", (800, 400), (20, 22, 28, 255))
         
     draw = ImageDraw.Draw(bg)
@@ -414,7 +406,6 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
     avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
     avatar = avatar.resize((150, 150))
 
-    # Circular mask
     mask = Image.new("L", (150, 150), 0)
     mask_draw = ImageDraw.Draw(mask)
     mask_draw.ellipse((0, 0, 150, 150), fill=255)
@@ -422,55 +413,37 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
     circular_avatar = Image.new("RGBA", (150, 150))
     circular_avatar.paste(avatar, (0, 0), mask)
 
-    # Centrage X=(800 - 150)/2 = 325. Position Y = 35.
     border_size = 162
     border_mask = Image.new("RGBA", (border_size, border_size), (0, 0, 0, 0))
     border_draw = ImageDraw.Draw(border_mask)
     border_draw.ellipse((0, 0, border_size, border_size), fill=(231, 76, 60, 255))
     
-    bg.paste(border_mask, (319, 29), border_mask)
-    bg.paste(circular_avatar, (325, 35), circular_avatar)
+    bg.paste(border_mask, (319, 24), border_mask)
+    bg.paste(circular_avatar, (325, 30), circular_avatar)
 
-    # 4. Text Configuration (En bas, très gros, gras, blanc avec gros contour noir)
+    # 4. Texte BIENVENUE PSEUDO (TRÈS GROS, Blanc + Gros contour noir)
     text_title = f"BIENVENUE {member.display_name.upper()} !"
-    text_sub = f"Tu es le membre n°{member.guild.member_count}"
     
-    title_size = 85 # Taille de base très grande
-    try:
+    title_size = 75 # Taille très grande de base
+    if os.path.exists(font_path_title):
         font_title = ImageFont.truetype(font_path_title, title_size)
-    except Exception:
+    else:
         font_title = ImageFont.load_default()
 
-    # Redimensionnement auto si le pseudo est trop long pour l'image
+    # Redimensionnement auto dynamique si le pseudo est trop long pour l'image
     try:
         title_width = draw.textlength(text_title, font=font_title)
-        while title_width > 760 and title_size > 40:
+        while title_width > 750 and title_size > 25:
             title_size -= 2
-            font_title = ImageFont.truetype(font_path_title, title_size)
+            font_title = ImageFont.truetype(font_path_title, title_size) if os.path.exists(font_path_title) else font_title
             title_width = draw.textlength(text_title, font=font_title)
-    except AttributeError:
-        # Fallback pour vieilles versions Pillow
-        title_width = font_title.getsize(text_title)[0]
+    except Exception:
+        title_width = 400
 
     title_x = (800 - title_width) / 2
-    title_y = 210
+    title_y = 220
 
-    # Configuration du sous-titre
-    sub_size = 40
-    try:
-        font_sub = ImageFont.truetype(font_path_sub, sub_size)
-    except Exception:
-        font_sub = ImageFont.load_default()
-
-    try:
-        sub_width = draw.textlength(text_sub, font=font_sub)
-    except AttributeError:
-        sub_width = font_sub.getsize(text_sub)[0]
-        
-    sub_x = (800 - sub_width) / 2
-    sub_y = 310
-
-    # Fonction pour dessiner le texte avec de gros contours
+    # Fonction pour dessiner un contour épais de 5px
     def draw_text_with_outline(x, y, text, font, text_color, outline_color, outline_width):
         for adj_x in range(-outline_width, outline_width + 1):
             for adj_y in range(-outline_width, outline_width + 1):
@@ -479,9 +452,7 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
                 draw.text((x + adj_x, y + adj_y), text, font=font, fill=outline_color)
         draw.text((x, y), text, font=font, fill=text_color)
 
-    # Dessin des textes
-    draw_text_with_outline(title_x, title_y, text_title, font_title, (255, 255, 255), (0, 0, 0), 4) # Contour épais de 4 pixels pour le gros texte
-    draw_text_with_outline(sub_x, sub_y, text_sub, font_sub, (255, 255, 255), (0, 0, 0), 2) # Contour de 2 pour le sous-titre
+    draw_text_with_outline(title_x, title_y, text_title, font_title, (255, 255, 255), (0, 0, 0), 5)
 
     buffer = io.BytesIO()
     bg.convert("RGB").save(buffer, format="PNG")
@@ -705,6 +676,7 @@ async def _configure_voice_channel(
         read_message_history=True,
         use_application_commands=True,
         move_members=True,
+        manage_channels=True,
         mute_members=True,
         deafen_members=True,
     )
@@ -1835,7 +1807,8 @@ async def on_member_join(member: discord.Member) -> None:
     if welcome_channel is not None:
         msg_content = (
             f"⛩️ Bienvenue dans les ruelles d'Asakusa, {member.mention} !\n"
-            f"Tu as été invité(e) par **{inviter_mention}**."
+            f"Tu as été invité(e) par **{inviter_mention}**.\n"
+            f"Tu es le membre n°{member.guild.member_count} !"
         )
         try:
             # Génération de l'image personnalisée
@@ -1848,7 +1821,8 @@ async def on_member_join(member: discord.Member) -> None:
                 title="⛩️ Bienvenue à Asakusa",
                 description=(
                     f"{member.mention}, les portes du temple s'ouvrent devant toi.\n"
-                    f"Tu as été invité(e) par **{inviter_mention}**.\n\n"
+                    f"Tu as été invité(e) par **{inviter_mention}**.\n"
+                    f"Tu es le membre n°{member.guild.member_count} !\n\n"
                     f"Passe d'abord par **{VERIFY_CHANNEL_NAME}** pour prouver que tu n'es pas un robot."
                 ),
                 color=discord.Color.gold(),
