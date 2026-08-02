@@ -379,24 +379,8 @@ class MatchState:
 
 
 # ===================== IMAGE GENERATION =====================
-def get_text_dimensions(text, font, draw):
-    # Compatibilité entre les versions anciennes et récentes de Pillow
-    try:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        return bbox[2] - bbox[0], bbox[3] - bbox[1]
-    except AttributeError:
-        return font.getsize(text)
-
 async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
-    # 1. Téléchargement de la police Montserrat-Black
-    font_path_title = "Montserrat-Black.ttf"
-    if not os.path.exists(font_path_title):
-        try:
-            urllib.request.urlretrieve("https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat-Black.ttf", font_path_title)
-        except Exception as e:
-            print(f"[WARN] Téléchargement police échoué : {e}")
-
-    # 2. Arrière-plan
+    # 1. Base Background (Image Demandée)
     bg_url = "https://cdn.discordapp.com/attachments/1460123533828030699/1533549541972902030/a0e0ef14cf5902013f6c12e94e79e45f.png?ex=6a70e4ce&is=6a6f934e&hm=3c2e90efd79c22aff07b073e636d21525ef46595a6d82f2df5bf57d2505527e7&"
     try:
         req = urllib.request.Request(bg_url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -408,15 +392,13 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
         # Fallback si l'image ne charge pas
         bg = Image.new("RGBA", (800, 400), (20, 22, 28, 255))
         
-    draw = ImageDraw.Draw(bg)
-
-    # 3. Avatar Processing (Image très grande, parfaitement centrée)
-    # Taille de l'avatar augmentée à 240x240
-    avatar_size = 240
-    avatar_bytes = await member.display_avatar.replace(size=256, format="png").read()
+    # 2. Avatar Processing (Image très grande, parfaitement centrée)
+    avatar_size = 300 # Très grande taille
+    avatar_bytes = await member.display_avatar.replace(size=512, format="png").read()
     avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
     avatar = avatar.resize((avatar_size, avatar_size))
 
+    # Masque circulaire
     mask = Image.new("L", (avatar_size, avatar_size), 0)
     mask_draw = ImageDraw.Draw(mask)
     mask_draw.ellipse((0, 0, avatar_size, avatar_size), fill=255)
@@ -430,50 +412,18 @@ async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
     border_draw = ImageDraw.Draw(border_mask)
     border_draw.ellipse((0, 0, border_size, border_size), fill=(231, 76, 60, 255))
     
-    # Calcul du centrage parfait sur le canvas de 800x400
-    # Le centre de l'avatar est abaissé légèrement pour laisser de la place au gros texte
+    # Centrage parfait sur le canvas de 800x400
     avatar_x = (800 - avatar_size) // 2
-    avatar_y = 135
+    avatar_y = (400 - avatar_size) // 2
     
     border_x = (800 - border_size) // 2
-    border_y = avatar_y - 8
+    border_y = (400 - border_size) // 2
     
+    # Collage sur le fond
     bg.paste(border_mask, (border_x, border_y), border_mask)
     bg.paste(circular_avatar, (avatar_x, avatar_y), circular_avatar)
 
-    # 4. Texte BIENVENUE PSEUDO (Géant, au-dessus de l'avatar)
-    text_title = f"BIENVENUE {member.display_name.upper()} !"
-    
-    title_size = 110 # Taille gigantesque
-    if os.path.exists(font_path_title):
-        font_title = ImageFont.truetype(font_path_title, title_size)
-    else:
-        font_title = ImageFont.load_default()
-
-    # Redimensionnement dynamique pour ne pas dépasser les 800px de large
-    title_width, title_height = get_text_dimensions(text_title, font_title, draw)
-    while title_width > 770 and title_size > 30:
-        title_size -= 4
-        font_title = ImageFont.truetype(font_path_title, title_size) if os.path.exists(font_path_title) else font_title
-        title_width, title_height = get_text_dimensions(text_title, font_title, draw)
-
-    title_x = (800 - title_width) / 2
-    title_y = 20 # Tout en haut
-
-    # Épaisseur du contour adaptatif
-    outline_width = max(3, title_size // 15)
-
-    def draw_text_with_outline(x, y, text, font, text_color, outline_color, out_w):
-        for adj_x in range(-out_w, out_w + 1):
-            for adj_y in range(-out_w, out_w + 1):
-                if adj_x == 0 and adj_y == 0:
-                    continue
-                draw.text((x + adj_x, y + adj_y), text, font=font, fill=outline_color)
-        draw.text((x, y), text, font=font, fill=text_color)
-
-    # Contour noir énorme, texte blanc
-    draw_text_with_outline(title_x, title_y, text_title, font_title, (255, 255, 255), (0, 0, 0), outline_width)
-
+    # Sauvegarde
     buffer = io.BytesIO()
     bg.convert("RGB").save(buffer, format="PNG")
     buffer.seek(0)
