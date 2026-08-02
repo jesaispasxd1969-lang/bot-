@@ -9,6 +9,7 @@ import urllib.request
 import math
 import statistics
 import asyncio
+import io
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Tuple
@@ -18,6 +19,12 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+
+# Requis pour la génération d'images style Koya
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    print("[ERREUR] La librairie Pillow n'est pas installée. Tapez 'pip install Pillow' dans le terminal.")
 
 # ===================== CONFIG =====================
 load_dotenv()
@@ -52,11 +59,12 @@ RANK_CATEGORY_NAME = os.getenv("RANK_CATEGORY_NAME", "🎭 ・ PARTIE PERSO ・ 
 RANK_CHANNEL_NAME = os.getenv("RANK_CHANNEL_NAME", "🎭・choisi-ton-rank")
 PARTY_CATEGORY_NAME = os.getenv("PARTY_CATEGORY_NAME", "PARTIE PERSO")
 ORGA_TEXT_CHANNEL_NAME = os.getenv("ORGA_TEXT_CHANNEL_NAME", "orga-pp")
-WELCOME_CHANNEL_NAME = os.getenv("WELCOME_CHANNEL_NAME", "bienvenue")
+WELCOME_CHANNEL_NAME = os.getenv("WELCOME_CHANNEL_NAME", "├🏮・kaminarimon")
 
 # Config Tickets
 TICKET_CATEGORY_NAME = os.getenv("TICKET_CATEGORY_NAME", "🏮 ・ TICKETS D'ASAKUSA ・ 🏮")
 TICKET_CHANNEL_NAME = os.getenv("TICKET_CHANNEL_NAME", "├🎟️・créer-un-ticket")
+METSUKE_ROLE_ID = 1460123520905380117
 
 CUSTOM_VOICE_CATEGORY_ID = int(os.getenv("CUSTOM_VOICE_CATEGORY_ID", "0"))
 CUSTOM_VOICE_CATEGORY_NAME = os.getenv("CUSTOM_VOICE_CATEGORY_NAME", ARTISANS_CATEGORY_NAME)
@@ -104,6 +112,7 @@ INTENTS.members = True
 INTENTS.voice_states = True
 INTENTS.messages = True
 INTENTS.message_content = False
+INTENTS.invites = True # Essentiel pour le tracker d'invitations
 
 RANK_OPTIONS: List[Tuple[str, int]] = [
     ("Fer 1", 100), ("Fer 2", 110), ("Fer 3", 120),
@@ -369,6 +378,64 @@ class MatchState:
         )
 
 
+# ===================== IMAGE GENERATION =====================
+async def generate_welcome_card(member: discord.Member) -> io.BytesIO:
+    # 1. Prepare font
+    font_path = "Roboto-Bold.ttf"
+    if not os.path.exists(font_path):
+        try:
+            urllib.request.urlretrieve("https://github.com/google/fonts/raw/main/ofl/roboto/Roboto-Bold.ttf", font_path)
+        except Exception:
+            pass 
+
+    # 2. Base Background (Dark theme Asakusa vibe)
+    bg = Image.new("RGB", (800, 250), (20, 22, 28))
+    draw = ImageDraw.Draw(bg)
+
+    # Decor lines
+    draw.rectangle([0, 0, 800, 15], fill=(231, 76, 60)) # Red top
+    draw.rectangle([0, 235, 800, 250], fill=(231, 76, 60)) # Red bottom
+
+    # 3. Download & Process Avatar
+    avatar_bytes = await member.display_avatar.replace(size=256, format="png").read()
+    avatar = Image.open(io.BytesIO(avatar_bytes)).convert("RGBA")
+    avatar = avatar.resize((150, 150))
+
+    # Circular mask
+    mask = Image.new("L", (150, 150), 0)
+    mask_draw = ImageDraw.Draw(mask)
+    mask_draw.ellipse((0, 0, 150, 150), fill=255)
+    
+    circular_avatar = Image.new("RGBA", (150, 150))
+    circular_avatar.paste(avatar, (0, 0), mask)
+
+    # Red Border
+    border_mask = Image.new("RGBA", (162, 162), (0, 0, 0, 0))
+    border_draw = ImageDraw.Draw(border_mask)
+    border_draw.ellipse((0, 0, 162, 162), fill=(231, 76, 60, 255))
+    
+    bg.paste(border_mask, (44, 44), border_mask)
+    bg.paste(circular_avatar, (50, 50), circular_avatar)
+
+    # 4. Text Configuration
+    try:
+        font_title = ImageFont.truetype(font_path, 42)
+        font_subtitle = ImageFont.truetype(font_path, 32)
+        font_count = ImageFont.truetype(font_path, 20)
+    except Exception:
+        font_title = font_subtitle = font_count = ImageFont.load_default()
+
+    # Draw Text
+    draw.text((230, 60), "BIENVENUE !", font=font_title, fill=(255, 255, 255))
+    draw.text((230, 115), f"{member.name}", font=font_subtitle, fill=(200, 210, 220))
+    draw.text((230, 165), f"Tu es le membre n°{member.guild.member_count}", font=font_count, fill=(231, 76, 60))
+
+    buffer = io.BytesIO()
+    bg.save(buffer, format="PNG")
+    buffer.seek(0)
+    return buffer
+
+
 # ===================== HELPERS =====================
 def tier_emoji(rank_name: str) -> str:
     tier = rank_name.split()[0]
@@ -428,7 +495,7 @@ def get_rank_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
 
 def get_welcome_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
     home_category = find_category(guild, HOME_CATEGORY_NAME)
-    aliases = [WELCOME_CHANNEL_NAME, "bienvenue", "welcome"]
+    aliases = [WELCOME_CHANNEL_NAME, "kaminarimon", "bienvenue", "welcome"]
     return find_text_channel(guild, aliases, category=home_category) or find_text_channel(guild, aliases)
 
 
@@ -1142,13 +1209,14 @@ class TicketPanelView(discord.ui.View):
         if not category:
             return await interaction.response.send_message("La catégorie de tickets est introuvable. Demande à un administrateur de refaire le /setup_pp.", ephemeral=True)
 
-        roles = await ensure_core_roles(guild)
-        orga_role = roles["orga"]
+        metsuke_role = guild.get_role(METSUKE_ROLE_ID)
+        if not metsuke_role:
+            return await interaction.response.send_message(f"Erreur : Le rôle Metsuke ({METSUKE_ROLE_ID}) n'a pas été trouvé. Demande à un admin.", ephemeral=True)
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True),
-            orga_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
+            metsuke_role: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True)
         }
 
         ticket_channel = await guild.create_text_channel(
@@ -1164,12 +1232,12 @@ class TicketPanelView(discord.ui.View):
             title="🎟️ Ticket Ouvert",
             description=(
                 f"Bienvenue {user.mention} !\n"
-                f"Un membre du staff ({orga_role.mention}) va te répondre sous peu.\n\n"
+                f"Un {metsuke_role.mention} va te répondre sous peu.\n\n"
                 "Merci d'expliquer ta demande en détail (Recrutement Staff, Preuve pour le rôle Radiant, ou autre problème)."
             ),
             color=discord.Color.gold()
         )
-        await ticket_channel.send(content=f"{user.mention} {orga_role.mention}", embed=embed, view=TicketActiveView())
+        await ticket_channel.send(content=f"{user.mention} {metsuke_role.mention}", embed=embed, view=TicketActiveView())
 
 
 class TicketActiveView(discord.ui.View):
@@ -1603,6 +1671,7 @@ class CustomVoiceControlView(discord.ui.View):
 class PPBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=INTENTS)
+        self.invites_cache = {}
 
     async def setup_hook(self) -> None:
         self.add_view(CaptchaView())
@@ -1626,7 +1695,31 @@ bot = PPBot()
 @bot.event
 async def on_ready() -> None:
     await seed_existing_prep_members(bot.guilds)
+    
+    # Cache invitations pour le tracker
+    for guild in bot.guilds:
+        try:
+            bot.invites_cache[guild.id] = await guild.invites()
+        except discord.Forbidden:
+            pass
+
     print(f"[OK] Connecté en tant que {bot.user} ({bot.user.id})")
+
+
+@bot.event
+async def on_invite_create(invite: discord.Invite) -> None:
+    try:
+        bot.invites_cache[invite.guild.id] = await invite.guild.invites()
+    except discord.Forbidden:
+        pass
+
+
+@bot.event
+async def on_invite_delete(invite: discord.Invite) -> None:
+    try:
+        bot.invites_cache[invite.guild.id] = await invite.guild.invites()
+    except discord.Forbidden:
+        pass
 
 
 @bot.event
@@ -1637,21 +1730,45 @@ async def on_member_join(member: discord.Member) -> None:
     except discord.Forbidden:
         pass
 
+    # ================= TRACKER INVITATION =================
+    inviter_mention = "un lien générique (ex: /asak)"
+    try:
+        old_invites = bot.invites_cache.get(member.guild.id, [])
+        new_invites = await member.guild.invites()
+        for invite in new_invites:
+            for old_invite in old_invites:
+                if invite.code == old_invite.code and invite.uses > old_invite.uses:
+                    if invite.inviter:
+                        inviter_mention = invite.inviter.mention
+                    break
+        bot.invites_cache[member.guild.id] = new_invites
+    except discord.Forbidden:
+        pass
+
     welcome_channel = get_welcome_channel(member.guild)
     if welcome_channel is not None:
-        embed = discord.Embed(
-            title="⛩️ Bienvenue à Asakusa",
-            description=(
-                f"{member.mention}, les portes du temple s'ouvrent devant toi.\n"
-                f"Passe d'abord par **{VERIFY_CHANNEL_NAME}** pour prouver que tu n'es pas un robot."
-            ),
-            color=discord.Color.gold(),
-        )
-        embed.set_footer(text="Une fois vérifié, n'oublie pas de choisir ton rang !")
         try:
-            await welcome_channel.send(embed=embed)
-        except (discord.Forbidden, discord.HTTPException):
-            pass
+            # Essayer de générer l'image s'il y a Pillow
+            img_buffer = await generate_welcome_card(member)
+            file = discord.File(fp=img_buffer, filename="welcome.png")
+            msg_content = f"⛩️ Bienvenue dans les ruelles d'Asakusa, {member.mention} ! Tu as été invité(e) par **{inviter_mention}**."
+            await welcome_channel.send(content=msg_content, file=file)
+        except Exception as e:
+            # Fallback (Si Pillow n'est pas installé ou s'il y a un bug d'image)
+            embed = discord.Embed(
+                title="⛩️ Bienvenue à Asakusa",
+                description=(
+                    f"{member.mention}, les portes du temple s'ouvrent devant toi.\n"
+                    f"Tu as été invité(e) par **{inviter_mention}**.\n\n"
+                    f"Passe d'abord par **{VERIFY_CHANNEL_NAME}** pour prouver que tu n'es pas un robot."
+                ),
+                color=discord.Color.gold(),
+            )
+            embed.set_footer(text="Une fois vérifié, n'oublie pas de choisir ton rang !")
+            try:
+                await welcome_channel.send(content=member.mention, embed=embed)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
 
 
 @bot.event
@@ -1778,6 +1895,14 @@ async def setup_pp(interaction: discord.Interaction) -> None:
         roles["orga"],
         view_channel=True, send_messages=True, add_reactions=True, read_message_history=True, manage_messages=True
     )
+    
+    metsuke_role = guild.get_role(METSUKE_ROLE_ID)
+    if metsuke_role:
+        await _safe_set_permissions(
+            ticket_channel,
+            metsuke_role,
+            view_channel=True, send_messages=True, add_reactions=True, read_message_history=True, manage_messages=True
+        )
 
     should_post_ticket = True
     async for msg in ticket_channel.history(limit=20):
