@@ -3074,7 +3074,7 @@ async def rr_add(interaction: discord.Interaction, riot_id: str,
     applied = None
     if RR_AUTO_SYNC_ROLES:
         try:
-            applied = await sync_rank_role_from_api(cible, tier_name)
+            applied = await sync_rank_role_from_api(cible, peak_tier_name)
         except discord.HTTPException:
             pass
 
