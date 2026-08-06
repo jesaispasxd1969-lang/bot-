@@ -278,6 +278,8 @@ class Database:
                 current_tier_name TEXT,
                 current_rr INTEGER NOT NULL DEFAULT 0,
                 elo INTEGER NOT NULL DEFAULT 0,
+                peak_tier_id INTEGER NOT NULL DEFAULT 0,
+                peak_tier_name TEXT,
                 last_match_id TEXT,
                 added_by INTEGER,
                 added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -309,6 +311,17 @@ class Database:
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rr_history_guild_date ON rr_history (guild_id, played_at)")
+
+        # Migration douce pour les bases déjà déployées (avant l'ajout du peak rank).
+        for ddl in (
+            "ALTER TABLE rr_players ADD COLUMN peak_tier_id INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE rr_players ADD COLUMN peak_tier_name TEXT",
+        ):
+            try:
+                cur.execute(ddl)
+            except sqlite3.OperationalError:
+                pass  # la colonne existe déjà
+
         self.conn.commit()
 
     def upsert_player_rank(self, user_id: int, rank_name: str) -> None:
@@ -484,6 +497,20 @@ class Database:
             WHERE puuid = ?
             """,
             (tier_id, tier_name, rr, elo, last_match_id, puuid),
+        )
+        self.conn.commit()
+
+    def rr_update_peak(self, puuid: str, tier_id, tier_name) -> None:
+        """Met à jour le peak rank uniquement s'il est plus haut que celui déjà enregistré."""
+        if tier_id is None:
+            return
+        self.conn.execute(
+            """
+            UPDATE rr_players
+            SET peak_tier_id = ?, peak_tier_name = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE puuid = ? AND ? >= peak_tier_id
+            """,
+            (tier_id, tier_name, puuid, tier_id),
         )
         self.conn.commit()
 
@@ -3056,39 +3083,52 @@ async def rr_add(interaction: discord.Interaction, riot_id: str,
             detected_region = region_value
         platform = RR_DEFAULT_PLATFORM
         mmr = await valo_api.get_mmr(detected_region, puuid, platform)
+
+        current = mmr.get("current") or {}
+        tier = current.get("tier") or {}
+        tier_id, tier_name = tier.get("id"), tier.get("name")
+        rr = current.get("rr")
+        elo = current.get("elo")
+        peak = mmr.get("peak") or {}
+        peak_tier = peak.get("tier") or {}
+        peak_tier_id, peak_tier_name = peak_tier.get("id"), peak_tier.get("name")
+        real_name = (mmr.get("account") or {}).get("name") or account.get("name") or name
+        real_tag = (mmr.get("account") or {}).get("tag") or account.get("tag") or tag
+
+        db.rr_add_player(puuid, interaction.guild.id, cible.id, real_name, real_tag,
+                         detected_region, platform, interaction.user.id)
+        db.rr_update_state(puuid, tier_id, tier_name, rr, elo, None)
+        db.rr_update_peak(puuid, peak_tier_id, peak_tier_name)
+
+        applied = None
+        if RR_AUTO_SYNC_ROLES:
+            try:
+                applied = await sync_rank_role_from_api(cible, peak_tier_name or tier_name)
+            except discord.HTTPException:
+                pass
+
+        channel = get_rr_channel(interaction.guild) or await ensure_rr_channel(interaction.guild)
+        message = (
+            f"✅ **{real_name}#{real_tag}** est maintenant suivi.\n"
+            f"• Rang actuel : **{rank_display(tier_name, rr)}**\n"
+            f"• Région : `{detected_region}` · Lié à {cible.mention}\n"
+        )
+        if applied:
+            message += f"• Rôle **{applied}** attribué automatiquement.\n"
+        if channel:
+            message += f"• Les résultats seront publiés dans {channel.mention}."
+        await interaction.followup.send(message, ephemeral=True)
+
     except ValorantAPIError as exc:
-        return await interaction.followup.send(f"❌ {exc}", ephemeral=True)
-
-    current = mmr.get("current") or {}
-    tier = current.get("tier") or {}
-    tier_id, tier_name = tier.get("id"), tier.get("name")
-    rr = current.get("rr")
-    elo = current.get("elo")
-    real_name = (mmr.get("account") or {}).get("name") or account.get("name") or name
-    real_tag = (mmr.get("account") or {}).get("tag") or account.get("tag") or tag
-
-    db.rr_add_player(puuid, interaction.guild.id, cible.id, real_name, real_tag,
-                     detected_region, platform, interaction.user.id)
-    db.rr_update_state(puuid, tier_id, tier_name, rr, elo, None)
-
-    applied = None
-    if RR_AUTO_SYNC_ROLES:
-        try:
-            applied = await sync_rank_role_from_api(cible, peak_tier_name)
-        except discord.HTTPException:
-            pass
-
-    channel = get_rr_channel(interaction.guild) or await ensure_rr_channel(interaction.guild)
-    message = (
-        f"✅ **{real_name}#{real_tag}** est maintenant suivi.\n"
-        f"• Rang actuel : **{rank_display(tier_name, rr)}**\n"
-        f"• Région : `{detected_region}` · Lié à {cible.mention}\n"
-    )
-    if applied:
-        message += f"• Rôle **{applied}** attribué automatiquement.\n"
-    if channel:
-        message += f"• Les résultats seront publiés dans {channel.mention}."
-    await interaction.followup.send(message, ephemeral=True)
+        await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+    except Exception as exc:
+        import traceback
+        print(f"[RR] /rr_add a planté pour {riot_id} : {exc}")
+        traceback.print_exc()
+        await interaction.followup.send(
+            f"❌ Erreur inattendue pendant l'ajout : `{exc}`\nRegarde les logs Render pour le détail complet.",
+            ephemeral=True,
+        )
 
 
 @bot.tree.command(name="rr_remove", description="Retire un joueur du suivi RR.")
