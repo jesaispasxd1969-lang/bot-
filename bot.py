@@ -10,15 +10,23 @@ import math
 import statistics
 import asyncio
 import io
+import urllib.parse
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict, List, Optional, Tuple
 from itertools import combinations
 
+import aiohttp
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # Python < 3.9
+    ZoneInfo = None  # type: ignore
 
 # Requis pour la génération d'images style Koya
 try:
@@ -254,6 +262,53 @@ class Database:
             )
             """
         )
+
+        # ---------- RR TRACKER ----------
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rr_players (
+                puuid TEXT PRIMARY KEY,
+                guild_id INTEGER NOT NULL,
+                discord_id INTEGER,
+                riot_name TEXT NOT NULL,
+                riot_tag TEXT NOT NULL,
+                region TEXT NOT NULL DEFAULT 'eu',
+                platform TEXT NOT NULL DEFAULT 'pc',
+                current_tier_id INTEGER NOT NULL DEFAULT 0,
+                current_tier_name TEXT,
+                current_rr INTEGER NOT NULL DEFAULT 0,
+                elo INTEGER NOT NULL DEFAULT 0,
+                last_match_id TEXT,
+                added_by INTEGER,
+                added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rr_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                puuid TEXT NOT NULL,
+                guild_id INTEGER NOT NULL,
+                match_id TEXT NOT NULL,
+                rr_change INTEGER NOT NULL,
+                rr_after INTEGER,
+                tier_name TEXT,
+                map_name TEXT,
+                agent TEXT,
+                kills INTEGER,
+                deaths INTEGER,
+                assists INTEGER,
+                rounds_won INTEGER,
+                rounds_lost INTEGER,
+                played_at TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (puuid, match_id)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_rr_history_guild_date ON rr_history (guild_id, played_at)")
         self.conn.commit()
 
     def upsert_player_rank(self, user_id: int, rank_name: str) -> None:
@@ -341,6 +396,151 @@ class Database:
             (prep_channel_id,),
         )
         self.conn.commit()
+
+    # ---------- RR TRACKER ----------
+    def rr_add_player(self, puuid: str, guild_id: int, discord_id: Optional[int],
+                      riot_name: str, riot_tag: str, region: str, platform: str,
+                      added_by: int) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO rr_players (puuid, guild_id, discord_id, riot_name, riot_tag,
+                                    region, platform, added_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(puuid) DO UPDATE SET
+                guild_id = excluded.guild_id,
+                discord_id = COALESCE(excluded.discord_id, rr_players.discord_id),
+                riot_name = excluded.riot_name,
+                riot_tag = excluded.riot_tag,
+                region = excluded.region,
+                platform = excluded.platform
+            """,
+            (puuid, guild_id, discord_id, riot_name, riot_tag, region, platform, added_by),
+        )
+        self.conn.commit()
+
+    def rr_remove_player(self, puuid: str) -> None:
+        self.conn.execute("DELETE FROM rr_players WHERE puuid = ?", (puuid,))
+        self.conn.execute("DELETE FROM rr_history WHERE puuid = ?", (puuid,))
+        self.conn.commit()
+
+    def rr_get_player(self, puuid: str) -> Optional[sqlite3.Row]:
+        return self.conn.execute("SELECT * FROM rr_players WHERE puuid = ?", (puuid,)).fetchone()
+
+    def rr_find_player(self, guild_id: int, name: str, tag: str) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT * FROM rr_players
+            WHERE guild_id = ? AND LOWER(riot_name) = LOWER(?) AND LOWER(riot_tag) = LOWER(?)
+            """,
+            (guild_id, name, tag),
+        ).fetchone()
+
+    def rr_find_by_discord(self, guild_id: int, discord_id: int) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM rr_players WHERE guild_id = ? AND discord_id = ?",
+            (guild_id, discord_id),
+        ).fetchone()
+
+    def rr_list_players(self, guild_id: int) -> List[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM rr_players WHERE guild_id = ? ORDER BY riot_name COLLATE NOCASE",
+            (guild_id,),
+        ).fetchall()
+
+    def rr_leaderboard(self, guild_id: int) -> List[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT * FROM rr_players
+            WHERE guild_id = ?
+            ORDER BY (CASE WHEN elo > 0 THEN elo ELSE current_tier_id * 100 + current_rr END) DESC,
+                     riot_name COLLATE NOCASE ASC
+            """,
+            (guild_id,),
+        ).fetchall()
+
+    def rr_update_identity(self, puuid: str, riot_name: str, riot_tag: str) -> None:
+        self.conn.execute(
+            "UPDATE rr_players SET riot_name = ?, riot_tag = ? WHERE puuid = ?",
+            (riot_name, riot_tag, puuid),
+        )
+        self.conn.commit()
+
+    def rr_link_discord(self, puuid: str, discord_id: Optional[int]) -> None:
+        self.conn.execute(
+            "UPDATE rr_players SET discord_id = ? WHERE puuid = ?", (discord_id, puuid)
+        )
+        self.conn.commit()
+
+    def rr_update_state(self, puuid: str, tier_id, tier_name, rr, elo, last_match_id) -> None:
+        self.conn.execute(
+            """
+            UPDATE rr_players
+            SET current_tier_id = COALESCE(?, current_tier_id),
+                current_tier_name = COALESCE(?, current_tier_name),
+                current_rr = COALESCE(?, current_rr),
+                elo = COALESCE(?, elo),
+                last_match_id = COALESCE(?, last_match_id),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE puuid = ?
+            """,
+            (tier_id, tier_name, rr, elo, last_match_id, puuid),
+        )
+        self.conn.commit()
+
+    def rr_add_history(self, puuid: str, guild_id: int, match_id: str, rr_change: int,
+                       rr_after, tier_name, map_name, agent, kills, deaths, assists,
+                       rounds_won, rounds_lost, played_at: str) -> bool:
+        """Retourne True si la partie est nouvelle (donc à annoncer)."""
+        cur = self.conn.execute(
+            """
+            INSERT OR IGNORE INTO rr_history (
+                puuid, guild_id, match_id, rr_change, rr_after, tier_name, map_name,
+                agent, kills, deaths, assists, rounds_won, rounds_lost, played_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (puuid, guild_id, match_id, rr_change, rr_after, tier_name, map_name,
+             agent, kills, deaths, assists, rounds_won, rounds_lost, played_at),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def rr_player_history(self, puuid: str, limit: int = 10) -> List[sqlite3.Row]:
+        return self.conn.execute(
+            "SELECT * FROM rr_history WHERE puuid = ? ORDER BY played_at DESC LIMIT ?",
+            (puuid, limit),
+        ).fetchall()
+
+    def rr_daily_stats(self, guild_id: int, since_iso: str) -> List[dict]:
+        rows = self.conn.execute(
+            """
+            SELECT h.puuid AS puuid,
+                   p.riot_name AS name,
+                   SUM(h.rr_change) AS total,
+                   COUNT(*) AS games,
+                   SUM(CASE WHEN h.rr_change > 0 THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN h.rr_change < 0 THEN 1 ELSE 0 END) AS losses
+            FROM rr_history h
+            JOIN rr_players p ON p.puuid = h.puuid
+            WHERE h.guild_id = ? AND h.played_at >= ?
+            GROUP BY h.puuid
+            ORDER BY total DESC
+            """,
+            (guild_id, since_iso),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def rr_period_stats(self, guild_id: int, puuid: str, since_iso: str) -> Optional[sqlite3.Row]:
+        return self.conn.execute(
+            """
+            SELECT SUM(rr_change) AS total,
+                   COUNT(*) AS games,
+                   SUM(CASE WHEN rr_change > 0 THEN 1 ELSE 0 END) AS wins,
+                   SUM(CASE WHEN rr_change < 0 THEN 1 ELSE 0 END) AS losses
+            FROM rr_history
+            WHERE guild_id = ? AND puuid = ? AND played_at >= ?
+            """,
+            (guild_id, puuid, since_iso),
+        ).fetchone()
 
 
 db = Database(DB_PATH)
@@ -444,6 +644,19 @@ def rank_select_emoji(guild: Optional[discord.Guild], rank_name: str):
             if custom_emoji is not None:
                 return custom_emoji
     return tier_emoji(rank_name)
+
+
+def find_rank_role_name(role: discord.Role) -> Optional[str]:
+    """Retourne le nom de rang correspondant à un rôle, même s'il est décoré."""
+    role_slug = slug(role.name)
+    best = None
+    for rank_name, _ in RANK_OPTIONS:
+        rank_slug = slug(rank_name)
+        if role_slug == rank_slug or rank_slug in role_slug.split():
+            return rank_name
+        if rank_slug in role_slug and (best is None or len(rank_name) > len(best)):
+            best = rank_name
+    return best
 
 
 def rank_value_for_member(member: discord.Member) -> int:
@@ -870,11 +1083,16 @@ async def refresh_custom_voice_panel(channel: discord.VoiceChannel) -> None:
 
 async def apply_rank(member: discord.Member, rank_name: str) -> None:
     roles = await ensure_core_roles(member.guild)
-    rank_role = discord.utils.get(member.guild.roles, name=rank_name)
+    # Récupère le rôle custom du rang (même décoré), et le crée avec sa couleur s'il n'existe pas.
+    rank_role = await ensure_rank_role(member.guild, rank_name)
     if rank_role is None:
         rank_role = await ensure_role(member.guild, rank_name)
 
-    to_remove = [r for r in member.roles if r.name in RANK_VALUE_BY_NAME or r == roles["non_verified"]]
+    to_remove = [
+        r for r in member.roles
+        if (r.name in RANK_VALUE_BY_NAME or find_rank_role_name(r) is not None or r == roles["non_verified"])
+        and r != rank_role
+    ]
     if to_remove:
         try:
             await member.remove_roles(*to_remove, reason="PP rank verification")
@@ -1178,6 +1396,732 @@ async def refresh_match_message(guild: discord.Guild, prep_channel_id: int) -> N
         await message.edit(embeds=build_match_embeds(guild, state), view=PPMatchView())
     except (discord.Forbidden, discord.HTTPException):
         pass
+
+
+# ===================== RR TRACKER : CONFIG =====================
+HENRIK_API_KEY = os.getenv("HENRIK_API_KEY", "")
+RR_CATEGORY_NAME = os.getenv("RR_CATEGORY_NAME", "🌸 ・ NAKAMISE DORI ・ 🌸")
+RR_CHANNEL_NAME = os.getenv("RR_CHANNEL_NAME", "├🏆・rr-check")
+RR_POLL_INTERVAL = int(os.getenv("RR_POLL_INTERVAL", "180"))
+RR_DEFAULT_REGION = os.getenv("RR_DEFAULT_REGION", "eu")
+RR_DEFAULT_PLATFORM = os.getenv("RR_DEFAULT_PLATFORM", "pc")
+RR_PAGE_SIZE = int(os.getenv("RR_PAGE_SIZE", "10"))
+RR_DAILY_RECAP_HOUR = int(os.getenv("RR_DAILY_RECAP_HOUR", "23"))
+RR_TIMEZONE = os.getenv("RR_TIMEZONE", "Europe/Paris")
+
+VALID_REGIONS = ["eu", "na", "ap", "kr", "latam", "br"]
+
+# Le rôle Radiant reste attribué manuellement via ticket : on ne le sync pas automatiquement.
+RR_AUTO_SYNC_ROLES = os.getenv("RR_AUTO_SYNC_ROLES", "1") == "1"
+
+# Conversion des tiers renvoyés par l'API (anglais) vers les noms de rôles du serveur (français).
+API_TIER_TO_FR = {
+    "Iron": "Fer",
+    "Bronze": "Bronze",
+    "Silver": "Argent",
+    "Gold": "Or",
+    "Platinum": "Platine",
+    "Diamond": "Diamant",
+    "Ascendant": "Ascendant",
+    "Immortal": "Immortal",
+    "Immortalr": "Immortal",
+    "Radiant": "Radiant",
+}
+
+RANK_TIER_COLOR = {
+    "Fer": 0x5A5A5A,
+    "Bronze": 0xA9744F,
+    "Argent": 0xC0C0C0,
+    "Or": 0xE6C200,
+    "Platine": 0x3EB4C4,
+    "Diamant": 0xB56EDC,
+    "Ascendant": 0x2ECC71,
+    "Immortal": 0xE0325B,
+    "Radiant": 0xFFF176,
+}
+
+MEDALS = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+
+def api_rank_to_fr(api_rank_name: Optional[str]) -> Optional[str]:
+    """'Immortal 2' -> 'Immortal 2' ; 'Gold 3' -> 'Or 3' ; 'Unrated' -> None."""
+    if not api_rank_name:
+        return None
+    parts = api_rank_name.strip().split()
+    tier_en = parts[0]
+    if tier_en in ("Unrated", "Unranked", "Unrankeds"):
+        return None
+    tier_fr = API_TIER_TO_FR.get(tier_en)
+    if tier_fr is None:
+        return None
+    if tier_fr == "Radiant":
+        return "Radiant"
+    division = parts[1] if len(parts) > 1 else "1"
+    candidate = f"{tier_fr} {division}"
+    return candidate if candidate in RANK_VALUE_BY_NAME else None
+
+
+def rank_display(tier_name: Optional[str], rr: Optional[int]) -> str:
+    fr = api_rank_to_fr(tier_name) or (tier_name or "Non classé")
+    if rr is None:
+        return fr
+    return f"{fr} | {rr}rr"
+
+
+def compute_elo(tier_id: Optional[int], rr: Optional[int], elo: Optional[int]) -> int:
+    if elo:
+        return int(elo)
+    return int(tier_id or 0) * 100 + int(rr or 0)
+
+
+# ===================== RR TRACKER : API HENRIKDEV =====================
+class ValorantAPIError(Exception):
+    pass
+
+
+class ValorantAPI:
+    """Client de l'API communautaire HenrikDev (non officielle Riot)."""
+
+    BASE = "https://api.henrikdev.xyz"
+
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self._session: Optional["aiohttp.ClientSession"] = None
+        self._lock = asyncio.Lock()
+
+    async def session(self):
+        async with self._lock:
+            if self._session is None or self._session.closed:
+                self._session = aiohttp.ClientSession(
+                    headers={"Authorization": self.api_key},
+                    timeout=aiohttp.ClientTimeout(total=20),
+                )
+            return self._session
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+
+    async def _get(self, path: str) -> dict:
+        if not self.api_key:
+            raise ValorantAPIError("Clé API HenrikDev manquante (HENRIK_API_KEY dans le .env).")
+        session = await self.session()
+        try:
+            async with session.get(f"{self.BASE}{path}") as resp:
+                try:
+                    payload = await resp.json()
+                except Exception:
+                    payload = {}
+                if resp.status == 404:
+                    raise ValorantAPIError("Joueur introuvable (vérifie le pseudo, le tag et la région).")
+                if resp.status == 429:
+                    raise ValorantAPIError("Limite de requêtes atteinte sur l'API Valorant, réessaie dans un instant.")
+                if resp.status == 403:
+                    raise ValorantAPIError("Clé API HenrikDev invalide ou expirée.")
+                if resp.status >= 400:
+                    errors = payload.get("errors") or []
+                    message = errors[0].get("message") if errors else f"Erreur API ({resp.status})"
+                    raise ValorantAPIError(message)
+                return payload
+        except asyncio.TimeoutError:
+            raise ValorantAPIError("L'API Valorant ne répond pas (timeout).")
+        except aiohttp.ClientError as exc:
+            raise ValorantAPIError(f"Erreur réseau vers l'API Valorant : {exc}")
+
+    async def get_account(self, name: str, tag: str) -> dict:
+        data = await self._get(f"/valorant/v2/account/{urllib.parse.quote(name)}/{urllib.parse.quote(tag)}")
+        return data.get("data") or {}
+
+    async def get_account_by_puuid(self, puuid: str) -> dict:
+        data = await self._get(f"/valorant/v2/by-puuid/account/{puuid}")
+        return data.get("data") or {}
+
+    async def get_mmr(self, region: str, puuid: str, platform: str = RR_DEFAULT_PLATFORM) -> dict:
+        data = await self._get(f"/valorant/v3/by-puuid/mmr/{region}/{platform}/{puuid}")
+        return data.get("data") or {}
+
+    async def get_mmr_history(self, region: str, puuid: str, platform: str = RR_DEFAULT_PLATFORM) -> dict:
+        data = await self._get(f"/valorant/v2/by-puuid/mmr-history/{region}/{platform}/{puuid}")
+        return data.get("data") or {}
+
+    async def get_matches(self, region: str, puuid: str, platform: str = RR_DEFAULT_PLATFORM,
+                          mode: str = "competitive", size: int = 5) -> list:
+        path = f"/valorant/v4/by-puuid/matches/{region}/{platform}/{puuid}?mode={mode}&size={size}"
+        data = await self._get(path)
+        return data.get("data") or []
+
+
+valo_api = ValorantAPI(HENRIK_API_KEY)
+
+
+# ===================== RR TRACKER : PARSING DES MATCHS =====================
+def _extract_match_id(entry: dict) -> Optional[str]:
+    for key in ("match_id", "matchid", "id"):
+        if entry.get(key):
+            return str(entry[key])
+    meta = entry.get("metadata") or {}
+    for key in ("match_id", "matchid"):
+        if meta.get(key):
+            return str(meta[key])
+    return None
+
+
+def _tier_from_entry(entry: dict) -> Tuple[Optional[int], Optional[str]]:
+    tier = entry.get("tier")
+    if isinstance(tier, dict):
+        return tier.get("id"), tier.get("name")
+    return entry.get("currenttier"), entry.get("currenttier_patched")
+
+
+def _rr_from_entry(entry: dict) -> Tuple[Optional[int], Optional[int]]:
+    """Retourne (rr_après, variation)."""
+    rr = entry.get("rr")
+    if rr is None:
+        rr = entry.get("ranking_in_tier")
+    change = entry.get("last_change")
+    if change is None:
+        change = entry.get("mmr_change_to_last_game")
+    if change is None:
+        change = entry.get("last_mmr_change")
+    return rr, change
+
+
+def _map_name_from_entry(entry: dict) -> Optional[str]:
+    map_field = entry.get("map")
+    if isinstance(map_field, dict):
+        return map_field.get("name")
+    if isinstance(map_field, str):
+        return map_field
+    meta = entry.get("metadata") or {}
+    map_field = meta.get("map")
+    if isinstance(map_field, dict):
+        return map_field.get("name")
+    if isinstance(map_field, str):
+        return map_field
+    return None
+
+
+def _parse_match_date(entry: dict) -> Optional[datetime]:
+    raw = entry.get("date") or entry.get("started_at") or (entry.get("metadata") or {}).get("started_at")
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(raw, tz=timezone.utc)
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+    raw = entry.get("date_raw")
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(raw, tz=timezone.utc)
+    return None
+
+
+def _find_match_details(matches: List[dict], match_id: str, puuid: str) -> dict:
+    """Extrait score, agent et KDA d'une partie depuis la matchlist v4."""
+    details: Dict[str, object] = {}
+    target = None
+    for match in matches:
+        if _extract_match_id(match) == match_id:
+            target = match
+            break
+    if target is None:
+        return details
+
+    details["map_name"] = _map_name_from_entry(target)
+
+    players = target.get("players")
+    if isinstance(players, dict):
+        players = players.get("all_players") or []
+    players = players or []
+
+    me = None
+    for player in players:
+        if str(player.get("puuid", "")).lower() == puuid.lower():
+            me = player
+            break
+    if me is None:
+        return details
+
+    agent = me.get("agent")
+    if isinstance(agent, dict):
+        details["agent_name"] = agent.get("name")
+        details["agent_id"] = agent.get("id")
+    else:
+        details["agent_name"] = me.get("character") or agent
+        details["agent_id"] = me.get("character_id")
+
+    stats = me.get("stats") if isinstance(me.get("stats"), dict) else me
+    details["kills"] = stats.get("kills")
+    details["deaths"] = stats.get("deaths")
+    details["assists"] = stats.get("assists")
+
+    my_team = me.get("team_id") or me.get("team")
+    teams = target.get("teams")
+    won: Optional[bool] = None
+    rounds_won = rounds_lost = None
+
+    if isinstance(teams, list):
+        for team in teams:
+            team_id = team.get("team_id") or team.get("team")
+            rounds = team.get("rounds") or {}
+            if isinstance(rounds, dict):
+                r_won = rounds.get("won")
+                r_lost = rounds.get("lost")
+            else:
+                r_won = team.get("rounds_won")
+                r_lost = team.get("rounds_lost")
+            if str(team_id).lower() == str(my_team).lower():
+                won = team.get("won")
+                rounds_won, rounds_lost = r_won, r_lost
+    elif isinstance(teams, dict):
+        red = teams.get("red") or {}
+        blue = teams.get("blue") or {}
+        red_score = red.get("rounds_won", red) if isinstance(red, dict) else red
+        blue_score = blue.get("rounds_won", blue) if isinstance(blue, dict) else blue
+        if isinstance(red_score, dict):
+            red_score = red_score.get("won")
+        if isinstance(blue_score, dict):
+            blue_score = blue_score.get("won")
+        if str(my_team).lower() == "red":
+            rounds_won, rounds_lost = red_score, blue_score
+        else:
+            rounds_won, rounds_lost = blue_score, red_score
+        if rounds_won is not None and rounds_lost is not None:
+            won = rounds_won > rounds_lost
+
+    details["rounds_won"] = rounds_won
+    details["rounds_lost"] = rounds_lost
+    details["won"] = won
+    return details
+
+
+def agent_icon_url(agent_id: Optional[str]) -> Optional[str]:
+    if not agent_id:
+        return None
+    return f"https://media.valorant-api.com/agents/{agent_id}/displayicon.png"
+
+
+# ===================== RR TRACKER : RÔLES DE RANG =====================
+def find_rank_role(guild: discord.Guild, rank_name: str) -> Optional[discord.Role]:
+    """Retrouve le rôle d'un rang, même si son nom est décoré (ex: '👑・Immortal 2')."""
+    exact = discord.utils.get(guild.roles, name=rank_name)
+    if exact is not None:
+        return exact
+    wanted = slug(rank_name)
+    for role in guild.roles:
+        if slug(role.name) == wanted:
+            return role
+    # Rôle décoré, ex: "👑・Immortal 2" ou "『 Or 3 』"
+    for role in guild.roles:
+        if find_rank_role_name(role) == rank_name:
+            return role
+    return None
+
+
+async def ensure_rank_role(guild: discord.Guild, rank_name: str) -> Optional[discord.Role]:
+    """Retourne le rôle custom du rang, et le crée avec la bonne couleur s'il n'existe pas."""
+    role = find_rank_role(guild, rank_name)
+    if role is not None:
+        return role
+    tier = rank_name.split()[0]
+    color = discord.Color(RANK_TIER_COLOR.get(tier, 0x99AAB5))
+    try:
+        return await guild.create_role(
+            name=rank_name,
+            color=color,
+            hoist=False,
+            mentionable=False,
+            reason="Création automatique du rôle de rang",
+        )
+    except discord.Forbidden:
+        print(f"[RR] Permissions insuffisantes pour créer le rôle {rank_name}")
+        return None
+    except discord.HTTPException as exc:
+        print(f"[RR] Impossible de créer le rôle {rank_name} : {exc}")
+        return None
+
+
+async def sync_rank_role_from_api(member: discord.Member, api_tier_name: Optional[str]) -> Optional[str]:
+    """Applique le rôle de rang correspondant au rang réel détecté via l'API."""
+    if not RR_AUTO_SYNC_ROLES:
+        return None
+    fr_rank = api_rank_to_fr(api_tier_name)
+    if fr_rank is None or fr_rank == "Radiant":
+        return None
+    current = [r.name for r in member.roles if r.name in RANK_VALUE_BY_NAME]
+    if fr_rank in current:
+        return None
+    await apply_rank(member, fr_rank)
+    return fr_rank
+
+
+# ===================== RR TRACKER : SALON =====================
+def get_rr_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    category = find_category(guild, RR_CATEGORY_NAME)
+    channel = find_text_channel(guild, [RR_CHANNEL_NAME, "rr-check", "rr check"], category=category)
+    if channel is None:
+        channel = find_text_channel(guild, [RR_CHANNEL_NAME, "rr-check", "rr check"])
+    return channel
+
+
+async def ensure_rr_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    """Crée la catégorie NAKAMISE DORI et le salon rr-check si besoin."""
+    category = find_category(guild, RR_CATEGORY_NAME)
+    if category is None:
+        try:
+            category = await guild.create_category(RR_CATEGORY_NAME, reason="Setup RR tracker")
+        except discord.Forbidden:
+            return None
+
+    channel = get_rr_channel(guild)
+    if channel is None:
+        try:
+            channel = await guild.create_text_channel(
+                name=RR_CHANNEL_NAME,
+                category=category,
+                topic="Suivi automatique des gains et pertes de RR des joueurs du serveur.",
+                reason="Setup RR tracker",
+            )
+        except discord.Forbidden:
+            return None
+    elif channel.category != category:
+        try:
+            await channel.edit(category=category, reason="Rangement du salon RR")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    roles = await ensure_core_roles(guild)
+    await _safe_set_permissions(channel, guild.default_role, view_channel=False)
+    await _safe_set_permissions(channel, roles["non_verified"], view_channel=False)
+    await _safe_set_permissions(
+        channel, roles["member"],
+        view_channel=True, send_messages=False, read_message_history=True, add_reactions=True,
+    )
+    await _safe_set_permissions(
+        channel, roles["orga"],
+        view_channel=True, send_messages=True, read_message_history=True, manage_messages=True,
+    )
+    return channel
+
+
+# ===================== RR TRACKER : EMBEDS =====================
+def build_match_embed(guild: discord.Guild, row: sqlite3.Row, entry: dict, details: dict,
+                       rr_change: int, rr_after: Optional[int], tier_name: Optional[str]) -> discord.Embed:
+    won = details.get("won")
+    rounds_won = details.get("rounds_won")
+    rounds_lost = details.get("rounds_lost")
+
+    if won is None and rounds_won is not None and rounds_lost is not None:
+        won = rounds_won > rounds_lost
+    if won is None:
+        won = rr_change > 0
+
+    if rounds_won is not None and rounds_lost is not None and rounds_won == rounds_lost:
+        titre, couleur = f"Égalité ({rounds_won}-{rounds_lost})", discord.Color(0x95A5A6)
+    elif won:
+        score = f" ({rounds_won}-{rounds_lost})" if rounds_won is not None else ""
+        titre, couleur = f"Victoire{score}", discord.Color(0x2ECC71)
+    else:
+        score = f" ({rounds_won}-{rounds_lost})" if rounds_won is not None else ""
+        titre, couleur = f"Défaite{score}", discord.Color(0xE74C3C)
+
+    pseudo = row["riot_name"]
+    verbe = "gagner" if rr_change >= 0 else "perdre"
+    rang_txt = api_rank_to_fr(tier_name) or (tier_name or "Non classé")
+    rr_txt = f"{rang_txt} {rr_after} RR" if rr_after is not None else rang_txt
+
+    embed = discord.Embed(
+        title=titre,
+        description=f"**{pseudo}** vient de {verbe} **{abs(rr_change)} RR** ({rr_txt})",
+        color=couleur,
+    )
+    embed.set_author(name="Résultat de la partie", icon_url=guild.icon.url if guild.icon else None)
+
+    kills = details.get("kills")
+    deaths = details.get("deaths")
+    assists = details.get("assists")
+    if kills is not None:
+        embed.add_field(name="Score", value=f"{kills}/{deaths}/{assists}", inline=True)
+    agent_name = details.get("agent_name")
+    if agent_name:
+        embed.add_field(name="Agent", value=str(agent_name), inline=True)
+    map_name = details.get("map_name") or _map_name_from_entry(entry)
+    if map_name:
+        embed.add_field(name="Map", value=str(map_name), inline=True)
+
+    icon = agent_icon_url(details.get("agent_id"))
+    if icon:
+        embed.set_thumbnail(url=icon)
+
+    if row["discord_id"]:
+        member = guild.get_member(int(row["discord_id"]))
+        if member is not None:
+            embed.set_footer(text=f"Compte lié à {member.display_name}")
+
+    played = _parse_match_date(entry)
+    embed.timestamp = played or datetime.now(timezone.utc)
+    return embed
+
+
+def build_leaderboard_embed(guild: discord.Guild, rows: List[sqlite3.Row], page: int, pages: int) -> discord.Embed:
+    embed = discord.Embed(title="Classement des joueurs", color=discord.Color(0xFF69B4))
+    if guild.icon:
+        embed.set_author(name="Classement des joueurs", icon_url=guild.icon.url)
+
+    start = page * RR_PAGE_SIZE
+    lignes: List[str] = []
+    for index, row in enumerate(rows[start:start + RR_PAGE_SIZE], start=start + 1):
+        medal = MEDALS.get(index, "")
+        prefix = f"{medal} **{index}er**" if index == 1 else f"{medal} **{index}ème**" if medal else f"**{index}ème**"
+        rang = rank_display(row["current_tier_name"], row["current_rr"])
+        lignes.append(f"{prefix}\n{row['riot_name']} ({rang})")
+
+    embed.description = "\n\n".join(lignes) if lignes else "Aucun joueur suivi pour le moment."
+    embed.set_footer(text=f"Page {page + 1}/{max(pages, 1)}")
+    embed.timestamp = datetime.now(timezone.utc)
+    return embed
+
+
+def build_daily_embed(guild: discord.Guild, stats: List[dict], jour_label: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="📅 Classement journalier — RR gagnés / perdus",
+        description=f"Bilan des parties classées du **{jour_label}**.",
+        color=discord.Color(0xF1C40F),
+    )
+    if not stats:
+        embed.description += "\n\nAucune partie classée enregistrée aujourd'hui."
+        embed.timestamp = datetime.now(timezone.utc)
+        return embed
+
+    lignes = []
+    for index, item in enumerate(stats[:20], start=1):
+        medal = MEDALS.get(index, f"`{index}.`")
+        total = item["total"]
+        signe = "+" if total >= 0 else ""
+        lignes.append(
+            f"{medal} **{item['name']}** — {signe}{total} RR "
+            f"({item['wins']}V / {item['losses']}D sur {item['games']} game(s))"
+        )
+    embed.add_field(name="Classement", value="\n".join(lignes), inline=False)
+
+    best = stats[0]
+    worst = stats[-1]
+    resume = f"🔥 Meilleur : **{best['name']}** ({'+' if best['total'] >= 0 else ''}{best['total']} RR)"
+    if len(stats) > 1:
+        resume += f"\n💀 Pire : **{worst['name']}** ({'+' if worst['total'] >= 0 else ''}{worst['total']} RR)"
+    total_global = sum(item["total"] for item in stats)
+    resume += f"\n📊 Bilan du serveur : {'+' if total_global >= 0 else ''}{total_global} RR"
+    embed.add_field(name="Résumé", value=resume, inline=False)
+    embed.timestamp = datetime.now(timezone.utc)
+    return embed
+
+
+class LeaderboardView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, rows: List[sqlite3.Row], page: int = 0):
+        super().__init__(timeout=180)
+        self.guild = guild
+        self.rows = rows
+        self.page = page
+        self.pages = max(1, math.ceil(len(rows) / RR_PAGE_SIZE))
+        self._refresh_buttons()
+
+    def _refresh_buttons(self) -> None:
+        self.previous_page.disabled = self.page <= 0
+        self.next_page.disabled = self.page >= self.pages - 1
+
+    async def _update(self, interaction: discord.Interaction) -> None:
+        self._refresh_buttons()
+        await interaction.response.edit_message(
+            embed=build_leaderboard_embed(self.guild, self.rows, self.page, self.pages),
+            view=self,
+        )
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.page = max(0, self.page - 1)
+        await self._update(interaction)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        self.page = min(self.pages - 1, self.page + 1)
+        await self._update(interaction)
+
+
+# ===================== RR TRACKER : BOUCLE DE SUIVI =====================
+def _paris_now() -> datetime:
+    try:
+        return datetime.now(ZoneInfo(RR_TIMEZONE))
+    except Exception:
+        return datetime.now(timezone.utc)
+
+
+def _start_of_today_utc_iso() -> str:
+    now = _paris_now()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.astimezone(timezone.utc).isoformat()
+
+
+async def process_player(guild: discord.Guild, row: sqlite3.Row,
+                          channel: Optional[discord.TextChannel]) -> None:
+    puuid = row["puuid"]
+    region = row["region"] or RR_DEFAULT_REGION
+    platform = row["platform"] or RR_DEFAULT_PLATFORM
+
+    try:
+        history_data = await valo_api.get_mmr_history(region, puuid, platform)
+    except ValorantAPIError as exc:
+        print(f"[RR] {row['riot_name']}#{row['riot_tag']} : {exc}")
+        return
+
+    # Mise à jour automatique du pseudo Riot en cas de changement.
+    account = history_data.get("account") or {}
+    new_name = account.get("name")
+    new_tag = account.get("tag")
+    if new_name and new_tag and (new_name != row["riot_name"] or new_tag != row["riot_tag"]):
+        db.rr_update_identity(puuid, new_name, new_tag)
+        if channel is not None:
+            try:
+                await channel.send(
+                    f"🔄 **{row['riot_name']}#{row['riot_tag']}** a changé de pseudo Riot "
+                    f"→ **{new_name}#{new_tag}**. Le suivi est à jour."
+                )
+            except discord.HTTPException:
+                pass
+        row = db.rr_get_player(puuid) or row
+
+    history = history_data.get("history") or history_data.get("data") or []
+    if not isinstance(history, list) or not history:
+        return
+
+    last_known = row["last_match_id"]
+    nouvelles: List[dict] = []
+    for entry in history:
+        match_id = _extract_match_id(entry)
+        if not match_id:
+            continue
+        if last_known and match_id == last_known:
+            break
+        nouvelles.append(entry)
+
+    latest = history[0]
+    latest_tier_id, latest_tier_name = _tier_from_entry(latest)
+    latest_rr, _ = _rr_from_entry(latest)
+    latest_match_id = _extract_match_id(latest)
+
+    # Premier passage : on enregistre l'état sans spammer l'historique.
+    if not last_known:
+        db.rr_update_state(puuid, latest_tier_id, latest_tier_name, latest_rr,
+                           latest.get("elo"), latest_match_id)
+        return
+
+    if not nouvelles:
+        db.rr_update_state(puuid, latest_tier_id, latest_tier_name, latest_rr,
+                           latest.get("elo"), last_known)
+        return
+
+    # On récupère les détails (agent, KDA, score) une seule fois pour toutes les nouvelles games.
+    matches: List[dict] = []
+    try:
+        matches = await valo_api.get_matches(region, puuid, platform, size=max(5, len(nouvelles)))
+    except ValorantAPIError as exc:
+        print(f"[RR] Détails de match indisponibles pour {row['riot_name']} : {exc}")
+
+    for entry in reversed(nouvelles):  # de la plus ancienne à la plus récente
+        match_id = _extract_match_id(entry)
+        rr_after, rr_change = _rr_from_entry(entry)
+        if rr_change is None:
+            continue
+        tier_id, tier_name = _tier_from_entry(entry)
+        details = _find_match_details(matches, match_id, puuid)
+
+        inserted = db.rr_add_history(
+            puuid=puuid,
+            guild_id=guild.id,
+            match_id=match_id,
+            rr_change=int(rr_change),
+            rr_after=rr_after,
+            tier_name=tier_name,
+            map_name=details.get("map_name") or _map_name_from_entry(entry),
+            agent=details.get("agent_name"),
+            kills=details.get("kills"),
+            deaths=details.get("deaths"),
+            assists=details.get("assists"),
+            rounds_won=details.get("rounds_won"),
+            rounds_lost=details.get("rounds_lost"),
+            played_at=(_parse_match_date(entry) or datetime.now(timezone.utc)).isoformat(),
+        )
+        if not inserted:
+            continue  # déjà annoncé
+
+        if channel is not None:
+            try:
+                await channel.send(embed=build_match_embed(
+                    guild, row, entry, details, int(rr_change), rr_after, tier_name
+                ))
+            except discord.HTTPException as exc:
+                print(f"[RR] Envoi du résultat impossible : {exc}")
+        await asyncio.sleep(1)
+
+    db.rr_update_state(puuid, latest_tier_id, latest_tier_name, latest_rr,
+                       latest.get("elo"), latest_match_id)
+
+    # Synchronisation du rôle de rang si le compte est lié à un membre Discord.
+    if row["discord_id"]:
+        member = guild.get_member(int(row["discord_id"]))
+        if member is not None:
+            try:
+                await sync_rank_role_from_api(member, latest_tier_name)
+            except discord.HTTPException:
+                pass
+
+
+@tasks.loop(seconds=RR_POLL_INTERVAL)
+async def rr_tracker_loop() -> None:
+    await bot.wait_until_ready()
+    if not HENRIK_API_KEY:
+        return
+    for guild in bot.guilds:
+        players = db.rr_list_players(guild.id)
+        if not players:
+            continue
+        channel = get_rr_channel(guild)
+        if channel is None:
+            channel = await ensure_rr_channel(guild)
+        for row in players:
+            try:
+                await process_player(guild, row, channel)
+            except Exception as exc:  # on ne casse jamais la boucle
+                print(f"[RR] Erreur inattendue sur {row['riot_name']} : {exc}")
+            await asyncio.sleep(1.5)
+
+
+@rr_tracker_loop.error
+async def rr_tracker_loop_error(exc: Exception) -> None:
+    print(f"[RR] La boucle de suivi a planté : {exc}")
+    await asyncio.sleep(30)
+    if not rr_tracker_loop.is_running():
+        rr_tracker_loop.start()
+
+
+@tasks.loop(minutes=10)
+async def rr_daily_recap_loop() -> None:
+    await bot.wait_until_ready()
+    now = _paris_now()
+    if now.hour != RR_DAILY_RECAP_HOUR or now.minute >= 10:
+        return
+    for guild in bot.guilds:
+        if not db.rr_list_players(guild.id):
+            continue
+        channel = get_rr_channel(guild)
+        if channel is None:
+            continue
+        stats = db.rr_daily_stats(guild.id, _start_of_today_utc_iso())
+        if not stats:
+            continue
+        try:
+            await channel.send(embed=build_daily_embed(guild, stats, now.strftime("%d/%m/%Y")))
+        except discord.HTTPException:
+            pass
 
 
 # ===================== UI: TICKETS =====================
@@ -1730,6 +2674,22 @@ async def on_ready() -> None:
         except discord.Forbidden:
             pass
 
+    # --- RR TRACKER ---
+    for guild in bot.guilds:
+        try:
+            await ensure_rr_channel(guild)
+        except discord.HTTPException as exc:
+            print(f"[RR] Salon non configuré sur {guild.name} : {exc}")
+
+    if HENRIK_API_KEY:
+        if not rr_tracker_loop.is_running():
+            rr_tracker_loop.start()
+        if not rr_daily_recap_loop.is_running():
+            rr_daily_recap_loop.start()
+        print(f"[RR] Tracker actif — vérification toutes les {RR_POLL_INTERVAL}s.")
+    else:
+        print("[RR] HENRIK_API_KEY manquante : le tracker RR est désactivé.")
+
     print(f"[OK] Connecté en tant que {bot.user} ({bot.user.id})")
 
 
@@ -1955,7 +2915,14 @@ async def setup_pp(interaction: discord.Interaction) -> None:
         )
         await ticket_channel.send(embed=embed, view=TicketPanelView())
 
+    # === CRÉATION DU SALON DE SUIVI RR ===
+    rr_channel = await ensure_rr_channel(guild)
+
     text = "✅ Setup de la catégorie PP terminé.\n• Les autres salons du serveur ont été laissés indépendants.\n"
+    if rr_channel is not None:
+        text += f"• Salon de suivi RR : {rr_channel.mention} (catégorie **{RR_CATEGORY_NAME}**).\n"
+    else:
+        text += "• ⚠️ Salon de suivi RR non créé (permission **Gérer les salons** manquante).\n"
     if missing:
         text += "⚠️ Salons introuvables : " + ", ".join(missing)
     else:
@@ -2008,6 +2975,363 @@ async def pp_cleanup(interaction: discord.Interaction) -> None:
     await interaction.response.send_message("✅ Partie active nettoyée.", ephemeral=True)
 
 
+# ===================== RR TRACKER : COMMANDES =====================
+def _parse_riot_id(riot_id: str) -> Optional[Tuple[str, str]]:
+    """Accepte 'Pseudo#TAG' ou 'Pseudo #TAG'."""
+    if "#" not in riot_id:
+        return None
+    name, _, tag = riot_id.rpartition("#")
+    name, tag = name.strip(), tag.strip()
+    if not name or not tag:
+        return None
+    return name, tag
+
+
+def _can_manage_rr(member: discord.Member) -> bool:
+    return is_admin(member) or has_orga_access(member)
+
+
+@bot.tree.command(name="rr_setup", description="Crée la catégorie NAKAMISE DORI et le salon rr-check.")
+@app_commands.guild_only()
+@app_commands.checks.has_permissions(manage_guild=True)
+async def rr_setup(interaction: discord.Interaction) -> None:
+    if not isinstance(interaction.user, discord.Member) or not is_admin(interaction.user):
+        return await interaction.response.send_message("Commande réservée aux admins du serveur.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    channel = await ensure_rr_channel(interaction.guild)
+    if channel is None:
+        return await interaction.followup.send(
+            "❌ Impossible de créer le salon : il manque la permission **Gérer les salons** au bot.",
+            ephemeral=True,
+        )
+
+    etat = "✅ Clé API HenrikDev détectée." if HENRIK_API_KEY else (
+        "⚠️ `HENRIK_API_KEY` absente du `.env` : le suivi automatique est désactivé."
+    )
+    await interaction.followup.send(
+        f"✅ Salon {channel.mention} prêt dans **{RR_CATEGORY_NAME}**.\n{etat}\n"
+        f"Ajoute des joueurs avec `/rr_add`, puis consulte `/leaderboard` et `/rr_help`.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="rr_add", description="Ajoute un joueur au suivi RR (pseudo au format Pseudo#TAG).")
+@app_commands.guild_only()
+@app_commands.describe(
+    riot_id="Identifiant Riot complet, ex: Uncrowned king#EUW",
+    membre="Membre Discord à lier à ce compte (optionnel).",
+    region="Région du compte (eu par défaut).",
+)
+@app_commands.choices(region=[app_commands.Choice(name=r.upper(), value=r) for r in VALID_REGIONS])
+async def rr_add(interaction: discord.Interaction, riot_id: str,
+                 membre: Optional[discord.Member] = None,
+                 region: Optional[app_commands.Choice[str]] = None) -> None:
+    if not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+
+    cible = membre or interaction.user
+    if cible != interaction.user and not _can_manage_rr(interaction.user):
+        return await interaction.response.send_message(
+            "Seuls les orgas et les admins peuvent ajouter le compte d'un autre membre.", ephemeral=True
+        )
+
+    parsed = _parse_riot_id(riot_id)
+    if parsed is None:
+        return await interaction.response.send_message(
+            "Format invalide. Utilise `Pseudo#TAG`, par exemple `Uncrowned king#EUW`.", ephemeral=True
+        )
+    name, tag = parsed
+    region_value = region.value if region else RR_DEFAULT_REGION
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
+    try:
+        account = await valo_api.get_account(name, tag)
+        puuid = account.get("puuid")
+        if not puuid:
+            return await interaction.followup.send("❌ Compte introuvable.", ephemeral=True)
+        detected_region = (account.get("region") or region_value or RR_DEFAULT_REGION).lower()
+        if detected_region not in VALID_REGIONS:
+            detected_region = region_value
+        platform = RR_DEFAULT_PLATFORM
+        mmr = await valo_api.get_mmr(detected_region, puuid, platform)
+    except ValorantAPIError as exc:
+        return await interaction.followup.send(f"❌ {exc}", ephemeral=True)
+
+    current = mmr.get("current") or {}
+    tier = current.get("tier") or {}
+    tier_id, tier_name = tier.get("id"), tier.get("name")
+    rr = current.get("rr")
+    elo = current.get("elo")
+    real_name = (mmr.get("account") or {}).get("name") or account.get("name") or name
+    real_tag = (mmr.get("account") or {}).get("tag") or account.get("tag") or tag
+
+    db.rr_add_player(puuid, interaction.guild.id, cible.id, real_name, real_tag,
+                     detected_region, platform, interaction.user.id)
+    db.rr_update_state(puuid, tier_id, tier_name, rr, elo, None)
+
+    applied = None
+    if RR_AUTO_SYNC_ROLES:
+        try:
+            applied = await sync_rank_role_from_api(cible, tier_name)
+        except discord.HTTPException:
+            pass
+
+    channel = get_rr_channel(interaction.guild) or await ensure_rr_channel(interaction.guild)
+    message = (
+        f"✅ **{real_name}#{real_tag}** est maintenant suivi.\n"
+        f"• Rang actuel : **{rank_display(tier_name, rr)}**\n"
+        f"• Région : `{detected_region}` · Lié à {cible.mention}\n"
+    )
+    if applied:
+        message += f"• Rôle **{applied}** attribué automatiquement.\n"
+    if channel:
+        message += f"• Les résultats seront publiés dans {channel.mention}."
+    await interaction.followup.send(message, ephemeral=True)
+
+
+@bot.tree.command(name="rr_remove", description="Retire un joueur du suivi RR.")
+@app_commands.guild_only()
+@app_commands.describe(riot_id="Identifiant Riot du joueur à retirer (Pseudo#TAG).")
+async def rr_remove(interaction: discord.Interaction, riot_id: str) -> None:
+    if not isinstance(interaction.user, discord.Member):
+        return await interaction.response.send_message("Interaction invalide.", ephemeral=True)
+
+    parsed = _parse_riot_id(riot_id)
+    if parsed is None:
+        return await interaction.response.send_message(
+            "Format invalide. Utilise `Pseudo#TAG`.", ephemeral=True
+        )
+    name, tag = parsed
+    row = db.rr_find_player(interaction.guild.id, name, tag)
+    if row is None:
+        return await interaction.response.send_message(
+            f"❌ **{name}#{tag}** n'est pas dans la liste de suivi.", ephemeral=True
+        )
+
+    est_le_sien = row["discord_id"] and int(row["discord_id"]) == interaction.user.id
+    if not est_le_sien and not _can_manage_rr(interaction.user):
+        return await interaction.response.send_message(
+            "Seuls les orgas et les admins peuvent retirer le compte d'un autre membre.", ephemeral=True
+        )
+
+    db.rr_remove_player(row["puuid"])
+    await interaction.response.send_message(
+        f"🗑️ **{row['riot_name']}#{row['riot_tag']}** a été retiré du suivi RR "
+        f"(son historique a été supprimé).", ephemeral=True
+    )
+
+
+@bot.tree.command(name="rr_list", description="Affiche la liste des joueurs suivis par le tracker RR.")
+@app_commands.guild_only()
+async def rr_list(interaction: discord.Interaction) -> None:
+    players = db.rr_list_players(interaction.guild.id)
+    if not players:
+        return await interaction.response.send_message(
+            "Aucun joueur suivi pour l'instant. Ajoute-toi avec `/rr_add Pseudo#TAG`.", ephemeral=True
+        )
+
+    lignes = []
+    for row in players:
+        lien = f"<@{row['discord_id']}>" if row["discord_id"] else "*non lié*"
+        lignes.append(
+            f"• **{row['riot_name']}#{row['riot_tag']}** — {rank_display(row['current_tier_name'], row['current_rr'])} "
+            f"· {lien} · `{row['region']}`"
+        )
+
+    embed = discord.Embed(
+        title=f"🎯 Joueurs suivis ({len(players)})",
+        description="\n".join(lignes)[:4000],
+        color=discord.Color(0xFF69B4),
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="leaderboard", description="Classement des joueurs suivis par RR.")
+@app_commands.guild_only()
+async def leaderboard(interaction: discord.Interaction) -> None:
+    rows = db.rr_leaderboard(interaction.guild.id)
+    if not rows:
+        return await interaction.response.send_message(
+            "Aucun joueur suivi pour l'instant. Ajoute-toi avec `/rr_add Pseudo#TAG`.", ephemeral=True
+        )
+    pages = max(1, math.ceil(len(rows) / RR_PAGE_SIZE))
+    view = LeaderboardView(interaction.guild, rows) if pages > 1 else None
+    await interaction.response.send_message(
+        embed=build_leaderboard_embed(interaction.guild, rows, 0, pages), view=view
+    )
+
+
+@bot.tree.command(name="daily", description="Classement journalier des RR gagnés et perdus.")
+@app_commands.guild_only()
+async def daily(interaction: discord.Interaction) -> None:
+    stats = db.rr_daily_stats(interaction.guild.id, _start_of_today_utc_iso())
+    embed = build_daily_embed(interaction.guild, stats, _paris_now().strftime("%d/%m/%Y"))
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="rr_stats", description="Statistiques RR détaillées d'un joueur suivi.")
+@app_commands.guild_only()
+@app_commands.describe(
+    riot_id="Identifiant Riot (Pseudo#TAG). Laisse vide pour ton propre compte.",
+    membre="Ou choisis directement un membre Discord.",
+)
+async def rr_stats(interaction: discord.Interaction, riot_id: Optional[str] = None,
+                   membre: Optional[discord.Member] = None) -> None:
+    row = None
+    if riot_id:
+        parsed = _parse_riot_id(riot_id)
+        if parsed is None:
+            return await interaction.response.send_message("Format invalide : `Pseudo#TAG`.", ephemeral=True)
+        row = db.rr_find_player(interaction.guild.id, *parsed)
+    else:
+        cible = membre or interaction.user
+        row = db.rr_find_by_discord(interaction.guild.id, cible.id)
+
+    if row is None:
+        return await interaction.response.send_message(
+            "❌ Ce joueur n'est pas suivi. Ajoute-le avec `/rr_add Pseudo#TAG`.", ephemeral=True
+        )
+
+    jour = db.rr_period_stats(interaction.guild.id, row["puuid"], _start_of_today_utc_iso())
+    semaine_iso = (_paris_now() - timedelta(days=7)).astimezone(timezone.utc).isoformat()
+    semaine = db.rr_period_stats(interaction.guild.id, row["puuid"], semaine_iso)
+
+    embed = discord.Embed(
+        title=f"📊 {row['riot_name']}#{row['riot_tag']}",
+        description=f"Rang actuel : **{rank_display(row['current_tier_name'], row['current_rr'])}**",
+        color=discord.Color(0xFF69B4),
+    )
+    if row["discord_id"]:
+        member = interaction.guild.get_member(int(row["discord_id"]))
+        if member:
+            embed.set_thumbnail(url=member.display_avatar.url)
+
+    def _bloc(stats) -> str:
+        if not stats or not stats["games"]:
+            return "Aucune partie."
+        total = stats["total"] or 0
+        return (f"{'+' if total >= 0 else ''}{total} RR\n"
+                f"{stats['wins']}V / {stats['losses']}D ({stats['games']} games)")
+
+    embed.add_field(name="Aujourd'hui", value=_bloc(jour), inline=True)
+    embed.add_field(name="7 derniers jours", value=_bloc(semaine), inline=True)
+
+    historique = db.rr_player_history(row["puuid"], limit=5)
+    if historique:
+        lignes = []
+        for h in historique:
+            signe = "🟢 +" if h["rr_change"] >= 0 else "🔴 "
+            score = f" ({h['rounds_won']}-{h['rounds_lost']})" if h["rounds_won"] is not None else ""
+            agent = f" · {h['agent']}" if h["agent"] else ""
+            lignes.append(f"{signe}{h['rr_change']} RR — {h['map_name'] or 'Map ?'}{score}{agent}")
+        embed.add_field(name="5 dernières parties", value="\n".join(lignes), inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="rr_help", description="Aide complète sur le bot de suivi RR.")
+@app_commands.guild_only()
+async def rr_help(interaction: discord.Interaction) -> None:
+    channel = get_rr_channel(interaction.guild)
+    salon = channel.mention if channel else f"`{RR_CHANNEL_NAME}`"
+
+    embed = discord.Embed(
+        title="🏆 Aide — Suivi RR Valorant",
+        description=(
+            f"Le bot surveille les parties classées des joueurs enregistrés et publie "
+            f"automatiquement le résultat dans {salon} (RR gagnés/perdus, score, agent, map).\n"
+            f"Vérification toutes les **{RR_POLL_INTERVAL // 60} minutes** environ."
+        ),
+        color=discord.Color(0xFF69B4),
+    )
+    embed.add_field(
+        name="➕ Ajouter un joueur",
+        value=(
+            "`/rr_add riot_id:Pseudo#TAG`\n"
+            "Ajoute ton propre compte au suivi.\n\n"
+            "`/rr_add riot_id:Pseudo#TAG membre:@Untel`\n"
+            "Ajoute le compte d'un autre membre *(orga/admin uniquement)*.\n\n"
+            "L'option `region` permet de préciser le serveur (eu par défaut)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="➖ Retirer un joueur",
+        value=(
+            "`/rr_remove riot_id:Pseudo#TAG`\n"
+            "Retire le compte du suivi et supprime son historique. "
+            "Chacun peut retirer son propre compte ; les orgas peuvent retirer n'importe qui."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="📋 Consulter",
+        value=(
+            "`/leaderboard` — classement général par RR (avec pages)\n"
+            "`/daily` — classement journalier des RR gagnés/perdus\n"
+            "`/rr_list` — liste des comptes suivis\n"
+            "`/rr_stats` — stats détaillées d'un joueur (jour, semaine, 5 dernières games)"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="⚙️ Administration",
+        value=(
+            "`/rr_setup` — crée la catégorie et le salon de suivi\n"
+            "`/rr_refresh` — force une vérification immédiate de tous les comptes"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="ℹ️ Bon à savoir",
+        value=(
+            "• Un changement de pseudo Riot est détecté et mis à jour tout seul.\n"
+            "• Le rôle de rang Discord est synchronisé automatiquement après chaque partie.\n"
+            "• Le récap journalier est publié chaque soir à "
+            f"{RR_DAILY_RECAP_HOUR}h.\n"
+            "• Seules les parties **classées** sont prises en compte."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Données fournies par l'API communautaire HenrikDev — non affiliée à Riot Games.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="rr_refresh", description="Force une vérification immédiate de tous les comptes suivis.")
+@app_commands.guild_only()
+async def rr_refresh(interaction: discord.Interaction) -> None:
+    if not isinstance(interaction.user, discord.Member) or not _can_manage_rr(interaction.user):
+        return await interaction.response.send_message(
+            "Commande réservée aux orgas et aux admins.", ephemeral=True
+        )
+    if not HENRIK_API_KEY:
+        return await interaction.response.send_message(
+            "❌ `HENRIK_API_KEY` absente du `.env` : le suivi est désactivé.", ephemeral=True
+        )
+
+    await interaction.response.defer(ephemeral=True, thinking=True)
+    players = db.rr_list_players(interaction.guild.id)
+    if not players:
+        return await interaction.followup.send("Aucun joueur suivi.", ephemeral=True)
+
+    channel = get_rr_channel(interaction.guild) or await ensure_rr_channel(interaction.guild)
+    erreurs = 0
+    for row in players:
+        try:
+            await process_player(interaction.guild, row, channel)
+        except Exception as exc:
+            erreurs += 1
+            print(f"[RR] refresh — erreur sur {row['riot_name']} : {exc}")
+        await asyncio.sleep(1)
+
+    texte = f"✅ Vérification terminée pour {len(players)} joueur(s)."
+    if erreurs:
+        texte += f"\n⚠️ {erreurs} compte(s) en erreur (voir les logs)."
+    await interaction.followup.send(texte, ephemeral=True)
+
+
 # ===================== RENDER WEB HEALTH SERVER =====================
 WEB_HOST = os.getenv("WEB_HOST", "0.0.0.0")
 WEB_PORT = int(os.getenv("PORT", os.getenv("WEB_PORT", "10000")))
@@ -2047,7 +3371,13 @@ def main() -> None:
     if not TOKEN:
         raise RuntimeError("DISCORD_BOT_TOKEN manquant dans le .env")
     start_health_server()
-    bot.run(TOKEN)
+    try:
+        bot.run(TOKEN)
+    finally:
+        try:
+            asyncio.run(valo_api.close())
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
